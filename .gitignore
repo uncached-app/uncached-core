@@ -5,12 +5,24 @@
 *.pdb
 *.dSYM/
 
-# Local tooling / agent state
+# Local tooling & AI agent state
 .agent/
+.agents/
 .superpowers/
 .claude/
+.cursor/
+.cursorrules
+.windsurf/
+.windsurfrules
+.cline/
+.roo/
+.clinerules
+.roomodes
 .codex/
 .opencode/
+.aider*
+*.local.md
+docs/superpowers/
 
 # IDEs & Editors
 .vscode/
