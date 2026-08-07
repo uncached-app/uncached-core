@@ -1,6 +1,6 @@
 use crate::error::CoreResult;
 use crate::filesystem::{
-    canonical_workspace, directory_size, is_protected_directory, read_entries,
+    canonical_workspace, directory_size, file_identity, is_protected_directory, read_entries,
 };
 use crate::model::{Category, ScanReport, ScanTarget};
 use std::fs;
@@ -27,6 +27,7 @@ pub struct TraversalEntry {
     pub path: PathBuf,
     pub name: String,
     pub category: Option<Category>,
+    pub identity: Option<crate::model::FileIdentity>,
 }
 
 impl Scanner for NodeModulesScanner {
@@ -84,11 +85,10 @@ pub fn scan_workspace(root: &Path, providers: &ProviderSet) -> CoreResult<ScanRe
 
     let mut targets = Vec::with_capacity(candidates.len());
     for path in candidates {
-        targets.push(ScanTarget::new(
-            path.clone(),
-            Category::NodeModules,
-            directory_size(&path)?,
-        ));
+        targets.push(
+            ScanTarget::new(path.clone(), Category::NodeModules, directory_size(&path)?)
+                .with_identity(file_identity(&path)),
+        );
     }
     let total_bytes = targets.iter().map(|target| target.size_bytes).sum();
     Ok(ScanReport {
@@ -146,6 +146,7 @@ where
             path: fs::canonicalize(entry.path())?,
             name,
             category,
+            identity: file_identity(&entry.path()),
         };
         match callback(&traversal_entry) {
             TraversalControl::Prune => continue,

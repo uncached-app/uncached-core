@@ -1,4 +1,6 @@
 use crate::error::{CoreError, CoreResult};
+use crate::model::FileIdentity;
+use jwalk::{Parallelism, WalkDir};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,24 +19,65 @@ pub fn is_protected_directory(name: &str) -> bool {
 }
 
 pub fn directory_size(root: &Path) -> CoreResult<u64> {
-    let mut total: u64 = 0;
-    let mut directories = vec![root.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        let mut entries = read_entries(&directory)?;
-        entries.sort_by_key(|left| left.file_name());
-        for entry in entries {
-            let metadata = fs::symlink_metadata(entry.path())?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            if metadata.is_dir() {
-                directories.push(entry.path());
-            } else if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
-            }
-        }
+    let report = directory_size_report(root)?;
+    if report.errors > 0 {
+        return Err(CoreError::InvalidTarget(format!(
+            "size traversal encountered {} errors",
+            report.errors
+        )));
     }
-    Ok(total)
+    Ok(report.bytes)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirectorySizeReport {
+    pub bytes: u64,
+    pub errors: u64,
+}
+
+pub fn directory_size_report(root: &Path) -> CoreResult<DirectorySizeReport> {
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get().clamp(1, 8))
+        .unwrap_or(1);
+    WalkDir::new(root)
+        .skip_hidden(false)
+        .follow_links(false)
+        .parallelism(Parallelism::RayonNewPool(workers))
+        .into_iter()
+        .try_fold(DirectorySizeReport::default(), |mut report, entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    report.errors += 1;
+                    return Ok(report);
+                }
+            };
+            match entry.metadata() {
+                Ok(metadata) if metadata.is_file() => {
+                    report.bytes = report.bytes.saturating_add(metadata.len());
+                }
+                Ok(_) => {}
+                Err(_) => report.errors += 1,
+            }
+            Ok(report)
+        })
+}
+
+pub fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(FileIdentity {
+            first: metadata.dev(),
+            second: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }
 
 pub fn read_entries(path: &Path) -> CoreResult<Vec<fs::DirEntry>> {

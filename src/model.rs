@@ -11,6 +11,13 @@ pub struct ScanTarget {
     pub path: PathBuf,
     pub category: Category,
     pub size_bytes: u64,
+    pub identity: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIdentity {
+    pub first: u64,
+    pub second: u64,
 }
 
 impl ScanTarget {
@@ -19,7 +26,13 @@ impl ScanTarget {
             path,
             category,
             size_bytes,
+            identity: None,
         }
+    }
+
+    pub fn with_identity(mut self, identity: Option<FileIdentity>) -> Self {
+        self.identity = identity;
+        self
     }
 }
 
@@ -32,4 +45,5 @@ pub struct ScanReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanReport {
     pub freed_bytes: u64,
+    pub size_has_errors: bool,
 }
