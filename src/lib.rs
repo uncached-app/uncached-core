@@ -7,4 +7,7 @@ pub mod scanner;
 pub use cleaner::{clean_to_trash, clean_to_trash_with_delete, validate_clean_target};
 pub use error::{CoreError, CoreResult};
 pub use model::{Category, CleanReport, ScanReport, ScanTarget};
-pub use scanner::{scan_workspace, NodeModulesScanner, ProviderSet, Scanner};
+pub use scanner::{
+    scan_workspace, traverse_workspace, NodeModulesScanner, ProviderSet, Scanner, TraversalControl,
+    TraversalEntry,
+};

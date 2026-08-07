@@ -5,6 +5,7 @@ use crate::filesystem::{
 use crate::model::{Category, ScanReport, ScanTarget};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub trait Scanner: Send + Sync {
     fn category(&self) -> Category;
@@ -13,6 +14,20 @@ pub trait Scanner: Send + Sync {
 }
 
 pub struct NodeModulesScanner;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalControl {
+    Continue,
+    Prune,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraversalEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub category: Option<Category>,
+}
 
 impl Scanner for NodeModulesScanner {
     fn category(&self) -> Category {
@@ -56,7 +71,15 @@ impl ProviderSet {
 pub fn scan_workspace(root: &Path, providers: &ProviderSet) -> CoreResult<ScanReport> {
     let root = canonical_workspace(root)?;
     let mut candidates = Vec::new();
-    visit_directories(&root, providers, &mut candidates)?;
+    let cancelled = AtomicBool::new(false);
+    traverse_workspace(&root, providers, &cancelled, |entry| {
+        if let Some(Category::NodeModules) = entry.category {
+            candidates.push(entry.path.clone());
+            TraversalControl::Prune
+        } else {
+            TraversalControl::Continue
+        }
+    })?;
     candidates.sort();
 
     let mut targets = Vec::with_capacity(candidates.len());
@@ -74,14 +97,38 @@ pub fn scan_workspace(root: &Path, providers: &ProviderSet) -> CoreResult<ScanRe
     })
 }
 
-fn visit_directories(
+pub fn traverse_workspace<F>(
+    root: &Path,
+    providers: &ProviderSet,
+    cancelled: &AtomicBool,
+    mut callback: F,
+) -> CoreResult<()>
+where
+    F: FnMut(&TraversalEntry) -> TraversalControl,
+{
+    let root = canonical_workspace(root)?;
+    visit_directories(&root, providers, cancelled, &mut callback)?;
+    Ok(())
+}
+
+fn visit_directories<F>(
     directory: &Path,
     providers: &ProviderSet,
-    targets: &mut Vec<PathBuf>,
-) -> CoreResult<()> {
+    cancelled: &AtomicBool,
+    callback: &mut F,
+) -> CoreResult<bool>
+where
+    F: FnMut(&TraversalEntry) -> TraversalControl,
+{
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(true);
+    }
     let mut entries = read_entries(directory)?;
     entries.sort_by_key(|left| left.file_name());
     for entry in entries {
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(true);
+        }
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             continue;
@@ -90,17 +137,26 @@ fn visit_directories(
         if is_protected_directory(&name) {
             continue;
         }
-        if providers
+        let category = providers
             .scanners
             .iter()
-            .any(|scanner| scanner.matches(&name) && scanner.confirm_context(&entry.path()))
-        {
-            targets.push(fs::canonicalize(entry.path())?);
-            continue;
+            .find(|scanner| scanner.matches(&name) && scanner.confirm_context(&entry.path()))
+            .map(|scanner| scanner.category());
+        let traversal_entry = TraversalEntry {
+            path: fs::canonicalize(entry.path())?,
+            name,
+            category,
+        };
+        match callback(&traversal_entry) {
+            TraversalControl::Prune => continue,
+            TraversalControl::Cancel => return Ok(true),
+            TraversalControl::Continue => {}
         }
-        visit_directories(&entry.path(), providers, targets)?;
+        if visit_directories(&entry.path(), providers, cancelled, callback)? {
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn is_nested_node_modules(path: &Path) -> bool {
