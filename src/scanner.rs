@@ -1,8 +1,9 @@
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::filesystem::{
-    canonical_workspace, directory_size, file_identity, is_protected_directory, read_entries,
+    canonical_workspace, directory_size, file_identity, is_protected_directory,
 };
 use crate::model::{Category, ScanReport, ScanTarget};
+use jwalk::{Parallelism, WalkDir};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +84,8 @@ pub fn scan_workspace(root: &Path, providers: &ProviderSet) -> CoreResult<ScanRe
     })?;
     candidates.sort();
 
+    // Target sizing remains sequential so scan results preserve existing error semantics;
+    // directory traversal and the later cleanup-specific sizing path are independently bounded.
     let mut targets = Vec::with_capacity(candidates.len());
     for path in candidates {
         targets.push(
@@ -107,57 +110,76 @@ where
     F: FnMut(&TraversalEntry) -> TraversalControl,
 {
     let root = canonical_workspace(root)?;
-    visit_directories(&root, providers, cancelled, &mut callback)?;
-    Ok(())
-}
-
-fn visit_directories<F>(
-    directory: &Path,
-    providers: &ProviderSet,
-    cancelled: &AtomicBool,
-    callback: &mut F,
-) -> CoreResult<bool>
-where
-    F: FnMut(&TraversalEntry) -> TraversalControl,
-{
     if cancelled.load(Ordering::Acquire) {
-        return Ok(true);
+        return Ok(());
     }
-    let mut entries = read_entries(directory)?;
-    entries.sort_by_key(|left| left.file_name());
+
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get().clamp(1, 8))
+        .unwrap_or(1);
+    let mut entries = WalkDir::new(&root)
+        .skip_hidden(false)
+        .follow_links(false)
+        .parallelism(Parallelism::RayonNewPool(workers))
+        .process_read_dir(|_depth, _path, _state, children| {
+            children.retain_mut(|result| {
+                let Ok(entry) = result else {
+                    return true;
+                };
+                let name = entry.file_name().to_string_lossy();
+                if entry.path_is_symlink() || !entry.file_type().is_dir() {
+                    entry.read_children_path = None;
+                    return false;
+                }
+                if is_protected_directory(&name) {
+                    entry.read_children_path = None;
+                    return false;
+                }
+                // Default provider target is pruned in the parallel walk itself. Custom
+                // providers still get callback-level pruning after deterministic replay.
+                let node_modules = NodeModulesScanner;
+                if name == "node_modules" && node_modules.confirm_context(&entry.path()) {
+                    entry.read_children_path = None;
+                }
+                true
+            });
+        })
+        .into_iter()
+        .map(|result| result.map_err(|error| CoreError::Io(error.into())))
+        .collect::<CoreResult<Vec<_>>>()?;
+
+    entries.sort_by_key(|entry| entry.path());
+    let providers = &providers.scanners;
+    let mut pruned = Vec::new();
     for entry in entries {
         if cancelled.load(Ordering::Acquire) {
-            return Ok(true);
+            return Ok(());
         }
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let path = entry.path();
+        if pruned
+            .iter()
+            .any(|ancestor: &PathBuf| path.starts_with(ancestor))
+        {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if is_protected_directory(&name) {
-            continue;
-        }
         let category = providers
-            .scanners
             .iter()
-            .find(|scanner| scanner.matches(&name) && scanner.confirm_context(&entry.path()))
+            .find(|scanner| scanner.matches(&name) && scanner.confirm_context(&path))
             .map(|scanner| scanner.category());
         let traversal_entry = TraversalEntry {
-            path: fs::canonicalize(entry.path())?,
+            path: fs::canonicalize(&path)?,
             name,
             category,
-            identity: file_identity(&entry.path()),
+            identity: file_identity(&path),
         };
         match callback(&traversal_entry) {
-            TraversalControl::Prune => continue,
-            TraversalControl::Cancel => return Ok(true),
+            TraversalControl::Prune => pruned.push(path),
+            TraversalControl::Cancel => return Ok(()),
             TraversalControl::Continue => {}
         }
-        if visit_directories(&entry.path(), providers, cancelled, callback)? {
-            return Ok(true);
-        }
     }
-    Ok(false)
+    Ok(())
 }
 
 fn is_nested_node_modules(path: &Path) -> bool {
