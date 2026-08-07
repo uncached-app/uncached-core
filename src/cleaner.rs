@@ -55,19 +55,31 @@ pub fn validate_clean_target(root: &Path, target: &ScanTarget) -> CoreResult<Pat
 }
 
 pub fn clean_to_trash(root: &Path, target: &ScanTarget) -> CoreResult<CleanReport> {
+    clean_to_trash_with_delete(root, target, |path| {
+        trash::delete(path).map_err(|error| error.to_string())
+    })
+}
+
+pub fn clean_to_trash_with_delete<F>(
+    root: &Path,
+    target: &ScanTarget,
+    delete: F,
+) -> CoreResult<CleanReport>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
     let canonical = validate_clean_target(root, target)?;
     let freed_bytes = directory_size(&canonical)?;
     let canonical = validate_clean_target(root, target)?;
-    match trash::delete(&canonical) {
+    match delete(&canonical) {
         Ok(()) => Ok(CleanReport { freed_bytes }),
         Err(error) => {
-            let message = error.to_string();
-            if message.to_lowercase().contains("too large")
-                || message.to_lowercase().contains("lixeira")
+            if error.to_lowercase().contains("too large")
+                || error.to_lowercase().contains("lixeira")
             {
                 Err(CoreError::RecycleBinTooLarge)
             } else {
-                Err(CoreError::Trash(message))
+                Err(CoreError::Trash(error))
             }
         }
     }
