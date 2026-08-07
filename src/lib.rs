@@ -9,7 +9,7 @@ pub use cleaner::{
     validate_clean_target,
 };
 pub use error::{CoreError, CoreResult};
-pub use model::{Category, CleanReport, ScanReport, ScanTarget};
+pub use model::{Category, CleanReport, FileIdentity, ScanReport, ScanTarget};
 pub use scanner::{
     scan_workspace, traverse_workspace, NodeModulesScanner, ProviderSet, Scanner, TraversalControl,
     TraversalEntry,
