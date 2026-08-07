@@ -17,6 +17,13 @@ pub fn validate_clean_target(root: &Path, target: &ScanTarget) -> CoreResult<Pat
             "target must be a real directory".into(),
         ));
     }
+    if target.path.ancestors().any(|ancestor| {
+        fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    }) {
+        return Err(CoreError::InvalidTarget(
+            "target has a symlinked ancestor".into(),
+        ));
+    }
     let canonical = fs::canonicalize(&target.path)?;
     if canonical.file_name().and_then(|name| name.to_str()) != Some("node_modules") {
         return Err(CoreError::InvalidTarget(
