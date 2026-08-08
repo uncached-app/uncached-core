@@ -8,13 +8,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[cfg(all(test, any(unix, windows)))]
-use std::sync::{Mutex, OnceLock};
+use std::cell::RefCell;
 
 #[cfg(all(test, any(unix, windows)))]
 type SecureTargetHook = Box<dyn FnOnce() + Send>;
 
 #[cfg(all(test, any(unix, windows)))]
-static SECURE_TARGET_HOOK: OnceLock<Mutex<Option<SecureTargetHook>>> = OnceLock::new();
+thread_local! {
+    static SECURE_TARGET_HOOK: RefCell<Option<SecureTargetHook>> = RefCell::new(None);
+}
 
 pub fn validate_clean_target(
     root: &Path,
@@ -134,19 +136,12 @@ fn canonical_target(target: &ScanTarget, policy: &CleanPolicy) -> ScanTarget {
 
 #[cfg(all(test, any(unix, windows)))]
 fn install_secure_target_hook(hook: impl FnOnce() + Send + 'static) {
-    *SECURE_TARGET_HOOK
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap() = Some(Box::new(hook));
+    SECURE_TARGET_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 #[cfg(all(test, any(unix, windows)))]
 fn run_secure_target_hook() {
-    let hook = SECURE_TARGET_HOOK
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .take();
+    let hook = SECURE_TARGET_HOOK.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
@@ -236,12 +231,17 @@ mod tests {
     use crate::filesystem::file_identity;
     use crate::{Category, CoreError, ProviderSet, ScanTarget};
     use std::fs;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStrExt;
     use std::path::PathBuf;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     #[cfg(any(unix, windows))]
     fn public_cleanup_cannot_delete_same_basename_replacement() {
         let root = fixture();
+        let _cleanup = CleanupGuard(root.clone());
         let project = root.join("project");
         let target_path = project.join("node_modules");
         fs::create_dir_all(&target_path).unwrap();
@@ -253,28 +253,84 @@ mod tests {
         let replacement = target_path.clone();
         let original = project.join("node_modules-original");
 
-        let hook_replacement = fs::canonicalize(&replacement).unwrap();
+        #[cfg(unix)]
+        let hook_source = fs::canonicalize(&replacement).unwrap();
+        #[cfg(windows)]
+        let hook_source = {
+            let source = project.join("node_modules-replacement");
+            fs::create_dir(&source).unwrap();
+            fs::canonicalize(source).unwrap()
+        };
+        #[cfg(unix)]
         let hook_original = original.clone();
+        let hook_replacement = fs::canonicalize(&replacement).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker_slot = Arc::new(Mutex::new(None));
+        let worker_slot_for_hook = Arc::clone(&worker_slot);
         install_secure_target_hook(move || {
-            #[cfg(unix)]
-            {
-                fs::rename(&hook_replacement, &hook_original).unwrap();
-                fs::create_dir(&hook_replacement).unwrap();
-                fs::write(hook_replacement.join("replacement.txt"), b"replacement").unwrap();
-            }
+            let worker = std::thread::spawn(move || loop {
+                #[cfg(unix)]
+                let rename_result = fs::rename(&hook_source, &hook_original);
+                #[cfg(windows)]
+                let rename_result = rename_replacing(&hook_source, &hook_replacement);
+                match rename_result {
+                    Ok(()) => {
+                        #[cfg(unix)]
+                        let result = fs::create_dir(&hook_replacement).and_then(|()| {
+                            fs::write(hook_replacement.join("replacement.txt"), b"replacement")
+                        });
+                        #[cfg(windows)]
+                        let result =
+                            fs::write(hook_replacement.join("replacement.txt"), b"replacement");
+                        let result = result.map_err(|error| error.to_string());
+                        let _ = done_tx.send(result);
+                        break;
+                    }
+                    Err(error) => {
+                        #[cfg(windows)]
+                        if error.raw_os_error() != Some(5) {
+                            let _ = done_tx.send(Err(error.to_string()));
+                            break;
+                        }
+                        let _ = ready_tx.send(());
+                        #[cfg(not(windows))]
+                        {
+                            let _ = done_tx.send(Err(error.to_string()));
+                            break;
+                        }
+                        if stop_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                }
+            });
             #[cfg(windows)]
-            {
-                let error = fs::rename(&hook_replacement, &hook_original).unwrap_err();
-                assert_eq!(error.raw_os_error(), Some(5));
-            }
+            ready_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker should observe retained-handle rename refusal");
+            *worker_slot_for_hook.lock().unwrap() = Some(worker);
         });
 
         let result = clean_permanently(&root, &ProviderSet::free(), &target);
+        let worker_result = done_rx.recv_timeout(Duration::from_secs(5));
+        if worker_result.is_err() {
+            let _ = stop_tx.send(());
+        }
+        let worker = worker_slot.lock().unwrap().take().unwrap();
+        worker.join().unwrap();
+        worker_result.unwrap().unwrap();
 
         #[cfg(windows)]
         {
             result.unwrap();
-            assert!(!replacement.exists());
+            assert_eq!(
+                fs::read(replacement.join("replacement.txt")).unwrap(),
+                b"replacement"
+            );
+            assert!(!replacement.join("original.txt").exists());
             assert!(!original.exists());
         }
         #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
@@ -283,11 +339,54 @@ mod tests {
                 result,
                 Err(CoreError::SecureOperationUnsupported { .. })
             ));
-            assert!(original.join("original.txt").exists());
-            assert!(replacement.join("replacement.txt").exists());
+            assert_eq!(
+                fs::read(replacement.join("replacement.txt")).unwrap(),
+                b"replacement"
+            );
+            assert!(!replacement.join("original.txt").exists());
+            assert_eq!(
+                fs::read(original.join("original.txt")).unwrap(),
+                b"original"
+            );
         }
+    }
 
-        let _ = fs::remove_dir_all(root);
+    struct CleanupGuard(PathBuf);
+
+    impl Drop for CleanupGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    fn rename_replacing(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let source: Vec<u16> = source
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: both paths are NUL-terminated and remain alive for the call.
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING,
+            )
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     #[test]

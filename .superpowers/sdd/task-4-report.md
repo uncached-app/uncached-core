@@ -71,3 +71,28 @@ Implemented in commit `5375020`.
 ### Concerns
 
 - Windows test executables in repository-local target directories remain susceptible to MSVC linker locks; isolated target directories were used for verification.
+
+## Final Review Fix
+
+### Changes
+
+- Strengthened the public Windows replacement regression in `src/cleaner.rs`.
+- Test-only hook now starts a worker that repeatedly attempts a same-basename replacement rename with retained secure handles, yields between attempts, and coordinates readiness/completion through channels.
+- Windows worker uses `MoveFileExW` with replacement semantics so the attempted rename observes `ERROR_ACCESS_DENIED` while the original target is retained, then succeeds after `clean_permanently` consumes the secure target and releases handles.
+- Worker creates replacement content only after successful rename; public assertions read replacement content, reject original content at replacement path, and verify original path is absent.
+- Completion wait is bounded, worker is stopped and joined on timeout, and a drop guard makes fixture cleanup reliable.
+- Test hook storage is thread-local to prevent parallel unit tests from consuming another test's hook.
+- Production cleanup behavior and Unix/macOS expectations remain unchanged.
+
+### Verification
+
+- Focused public regression: `cargo test --target-dir C:\Users\srmat\AppData\Local\Temp\opencode\uncached-core-task4-focused-final --lib public_cleanup_cannot_delete_same_basename_replacement -- --nocapture` passed, 1 test.
+- Full isolated Windows suite: `cargo test --target-dir C:\Users\srmat\AppData\Local\Temp\opencode\uncached-core-task4-final2 -j 1` passed, 24 unit tests, 40 integration tests, 2 provider tests, doc tests.
+- `cargo clippy --target-dir C:\Users\srmat\AppData\Local\Temp\opencode\uncached-core-task4-clippy-final --all-targets --all-features -- -D warnings` passed.
+- `cargo fmt --all -- --check` passed.
+- `git diff --check` passed.
+
+### Concerns
+
+- Windows test output retains existing non-ASCII reparse-link diagnostic rendering; the test passes.
+- Isolated target directories remain necessary when repository-local MSVC artifacts are locked.
