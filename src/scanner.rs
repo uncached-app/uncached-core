@@ -2,7 +2,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::filesystem::{
     canonical_workspace, directory_size, file_identity, is_protected_directory,
 };
-use crate::model::{Category, ScanReport, ScanTarget};
+use crate::model::{Category, ScanOutcome, ScanReport, ScanTarget, TraversalOutcome};
 use jwalk::{Parallelism, WalkDir};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,22 @@ pub struct ProviderSet {
 }
 
 impl ProviderSet {
+    pub fn new() -> Self {
+        Self {
+            scanners: Vec::new(),
+        }
+    }
+
+    pub fn with_scanner(scanner: impl Scanner + 'static) -> Self {
+        Self {
+            scanners: vec![Box::new(scanner)],
+        }
+    }
+
+    pub fn add_scanner(&mut self, scanner: impl Scanner + 'static) {
+        self.scanners.push(Box::new(scanner));
+    }
+
     pub fn free() -> Self {
         Self {
             scanners: vec![Box::new(NodeModulesScanner)],
@@ -70,11 +86,32 @@ impl ProviderSet {
     }
 }
 
-pub fn scan_workspace(root: &Path, providers: &ProviderSet) -> CoreResult<ScanReport> {
+impl Default for ProviderSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn scan_workspace(
+    root: &Path,
+    providers: &ProviderSet,
+    cancelled: &AtomicBool,
+) -> CoreResult<ScanOutcome> {
+    scan_workspace_with_sizing(root, providers, cancelled, directory_size)
+}
+
+pub fn scan_workspace_with_sizing<S>(
+    root: &Path,
+    providers: &ProviderSet,
+    cancelled: &AtomicBool,
+    mut size: S,
+) -> CoreResult<ScanOutcome>
+where
+    S: FnMut(&Path) -> CoreResult<u64>,
+{
     let root = canonical_workspace(root)?;
     let mut candidates = Vec::new();
-    let cancelled = AtomicBool::new(false);
-    traverse_workspace(&root, providers, &cancelled, |entry| {
+    let outcome = traverse_workspace(&root, providers, cancelled, |entry| {
         if let Some(Category::NodeModules) = entry.category {
             candidates.push(entry.path.clone());
             TraversalControl::Prune
@@ -82,22 +119,30 @@ pub fn scan_workspace(root: &Path, providers: &ProviderSet) -> CoreResult<ScanRe
             TraversalControl::Continue
         }
     })?;
+    if outcome == TraversalOutcome::Cancelled {
+        return Ok(ScanOutcome::Cancelled);
+    }
     candidates.sort();
 
-    // Target sizing remains sequential so scan results preserve existing error semantics;
-    // directory traversal and the later cleanup-specific sizing path are independently bounded.
     let mut targets = Vec::with_capacity(candidates.len());
     for path in candidates {
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(ScanOutcome::Cancelled);
+        }
+        let size_bytes = size(&path)?;
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(ScanOutcome::Cancelled);
+        }
         targets.push(
-            ScanTarget::new(path.clone(), Category::NodeModules, directory_size(&path)?)
+            ScanTarget::new(path.clone(), Category::NodeModules, size_bytes)
                 .with_identity(file_identity(&path)),
         );
     }
     let total_bytes = targets.iter().map(|target| target.size_bytes).sum();
-    Ok(ScanReport {
+    Ok(ScanOutcome::Completed(ScanReport {
         targets,
         total_bytes,
-    })
+    }))
 }
 
 pub fn traverse_workspace<F>(
@@ -105,22 +150,20 @@ pub fn traverse_workspace<F>(
     providers: &ProviderSet,
     cancelled: &AtomicBool,
     mut callback: F,
-) -> CoreResult<()>
+) -> CoreResult<TraversalOutcome>
 where
     F: FnMut(&TraversalEntry) -> TraversalControl,
 {
     let root = canonical_workspace(root)?;
     if cancelled.load(Ordering::Acquire) {
-        return Ok(());
+        return Ok(TraversalOutcome::Cancelled);
     }
 
-    let workers = std::thread::available_parallelism()
-        .map(|count| count.get().clamp(1, 8))
-        .unwrap_or(1);
-    let mut entries = WalkDir::new(&root)
+    let entries = WalkDir::new(&root)
+        .sort(true)
         .skip_hidden(false)
         .follow_links(false)
-        .parallelism(Parallelism::RayonNewPool(workers))
+        .parallelism(Parallelism::Serial)
         .process_read_dir(|_depth, _path, _state, children| {
             children.retain_mut(|result| {
                 let Ok(entry) = result else {
@@ -135,26 +178,17 @@ where
                     entry.read_children_path = None;
                     return false;
                 }
-                // Default provider target is pruned in the parallel walk itself. Custom
-                // providers still get callback-level pruning after deterministic replay.
-                let node_modules = NodeModulesScanner;
-                if name == "node_modules" && node_modules.confirm_context(&entry.path()) {
-                    entry.read_children_path = None;
-                }
                 true
             });
         })
-        .into_iter()
-        .map(|result| result.map_err(|error| CoreError::Io(error.into())))
-        .collect::<CoreResult<Vec<_>>>()?;
-
-    entries.sort_by_key(|entry| entry.path());
+        .into_iter();
     let providers = &providers.scanners;
     let mut pruned = Vec::new();
-    for entry in entries {
+    for result in entries {
         if cancelled.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(TraversalOutcome::Cancelled);
         }
+        let entry = result.map_err(|error| CoreError::Io(error.into()))?;
         let path = entry.path();
         if pruned
             .iter()
@@ -168,18 +202,18 @@ where
             .find(|scanner| scanner.matches(&name) && scanner.confirm_context(&path))
             .map(|scanner| scanner.category());
         let traversal_entry = TraversalEntry {
-            path: fs::canonicalize(&path)?,
+            path: path.clone(),
             name,
             category,
             identity: file_identity(&path),
         };
         match callback(&traversal_entry) {
             TraversalControl::Prune => pruned.push(path),
-            TraversalControl::Cancel => return Ok(()),
+            TraversalControl::Cancel => return Ok(TraversalOutcome::Cancelled),
             TraversalControl::Continue => {}
         }
     }
-    Ok(())
+    Ok(TraversalOutcome::Completed)
 }
 
 fn is_nested_node_modules(path: &Path) -> bool {
