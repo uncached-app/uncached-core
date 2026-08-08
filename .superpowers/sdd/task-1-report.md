@@ -14,7 +14,6 @@ Status: COMPLETE
 - `src/error.rs`
 - `src/secure_cleanup.rs`
 - `src/lib.rs`
-- `tests/secure_cleanup.rs`
 - `.superpowers/sdd/task-1-report.md`
 
 ## TDD Evidence
@@ -73,3 +72,31 @@ Result: passed with no output.
 - Platform backends and public cleaner routing remain intentionally deferred to Tasks 2-5.
 - `secure_cleanup` is intentionally dead-code-allowed until cleaner integration consumes its dispatch points.
 - Existing Windows test output contains localized junction-creation text; tests still pass.
+
+## Review Fix
+
+- Removed `tests/secure_cleanup.rs`; it only constructed `CoreError` directly and did not exercise a public cleanup entry point.
+- Retained contract-only unsupported-operation assertions in `src/secure_cleanup.rs` unit tests beside the private `SecureTarget` contract.
+- Did not add public cleaner routing or platform backends; those remain deferred to Task 4 and later tasks.
+
+## Fix Verification
+
+Focused baseline before removal:
+
+```text
+cargo test --test secure_cleanup
+```
+
+Result: 1 integration test passed, 0 failed. This target was removed by the fix, so no focused integration target remains.
+
+```text
+cargo test
+```
+
+Result: 9 unit tests, 39 node_modules tests, 2 provider tests, 0 integration tests, and 0 doc-test failures.
+
+```text
+cargo fmt --all -- --check
+```
+
+Result: passed with no output.
