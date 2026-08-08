@@ -43,3 +43,30 @@ artifacts. The required isolated-target retry succeeded.
 
 - The brief names `cargo test --test secure_cleanup`, but no such Cargo integration target exists. This is a command/spec mismatch, not an implementation failure; secure-cleanup coverage is included in the passing unit suite.
 - Cargo artifact locks occurred during Linux cross-check attempts on Windows. Serial isolated-target retry resolved verification.
+
+## Final Whole-Branch Review Fix
+
+Date: 2026-08-08
+
+### Changes
+
+- Replaced unchecked Windows `FILE_ID_EXTD_DIR_INFO` dereferences with a bounded parser using checked offsets and unaligned reads.
+- Parser validates record header availability, field layout, even UTF-16 name length, name slice bounds, record bounds, and nonzero `NextEntryOffset` minimum, alignment, and in-buffer range. Malformed responses map to `SecureEnumerationFailed`.
+- Added Windows-only pure-buffer tests for truncated headers, odd name lengths, invalid offsets, and out-of-bounds names.
+- Mapped `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`, and `ERROR_INVALID_PARAMETER` from `FileDispositionInfoEx` to `SecureOperationUnsupported` while preserving source and path. Other native failures remain `SecureDeletionFailed`.
+- Kept Windows permanent capability explicit; no fallback was added. Unix/macOS runtime policy, identity/reparse handling, UTF-16 conversion, and injected cleaner helpers remain unchanged.
+
+### TDD and Verification
+
+- RED: focused malformed-record test command initially failed to compile because parser and native-error mapping did not exist; after implementation, one test exposed an incorrect truncated-header fixture and was corrected.
+- GREEN: `cargo test secure_cleanup::windows::tests -- --nocapture` passed, 16 tests.
+- Full Windows suite: `cargo test -j 1` passed, 30 unit tests, 41 `node_modules` tests, 2 provider tests, 2 doc tests, 0 failures.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo fmt --all -- --check` passed.
+- `cargo check --target x86_64-unknown-linux-gnu` passed with isolated target and serial build settings.
+- `git diff --check` passed.
+
+### Concerns
+
+- Linux and macOS runtime tests remain unavailable on this Windows host; Linux cross-check is compile-only.
+- Existing repository-local `target-*` directories are unrelated untracked build artifacts and were not modified or removed.

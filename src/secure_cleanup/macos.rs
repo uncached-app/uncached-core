@@ -25,7 +25,12 @@ impl MacosTarget {
 
     pub(super) fn delete_permanently(self) -> CoreResult<()> {
         Err(CoreError::SecureOperationUnsupported {
+            path: std::path::PathBuf::new(),
             operation: "macOS top-level directory deletion by retained file descriptor".to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "macOS top-level directory deletion is not identity-preserving",
+            ),
         })
     }
 

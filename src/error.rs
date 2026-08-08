@@ -19,8 +19,13 @@ pub enum CoreError {
     TargetIdentityChanged { path: PathBuf },
     #[error("target or ancestor is a reparse point or symlink: {path}")]
     TargetReparsePoint { path: PathBuf },
-    #[error("secure operation unsupported: {operation}")]
-    SecureOperationUnsupported { operation: String },
+    #[error("secure operation unsupported for {path} ({operation}): {source}")]
+    SecureOperationUnsupported {
+        path: PathBuf,
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("secure target open failed for {path}: {source}")]
     SecureTargetOpenFailed {
         path: PathBuf,

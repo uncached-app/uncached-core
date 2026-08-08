@@ -2,10 +2,13 @@ use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 use std::ffi::c_void;
 use std::ffi::OsString;
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{offset_of, size_of, MaybeUninit};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
+    INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FileIdExtdDirectoryInfo, GetFileInformationByHandleEx,
     SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -65,10 +68,10 @@ impl WindowsTarget {
                 )
             };
             if ok == 0 {
-                return Err(CoreError::SecureDeletionFailed {
-                    path: entry.path,
-                    source: std::io::Error::last_os_error(),
-                });
+                return Err(map_disposition_error(
+                    &entry.path,
+                    std::io::Error::last_os_error(),
+                ));
             }
         }
         Ok(())
@@ -325,41 +328,153 @@ fn enumerate_directory(
                 source: error,
             });
         }
-        let mut offset = 0usize;
-        loop {
-            // SAFETY: Windows returns aligned entries whose offset stays within buffer.
-            let info = unsafe { &*(buffer.as_ptr().add(offset) as *const FILE_ID_EXTD_DIR_INFO) };
-            let name_len = info.FileNameLength as usize / 2;
-            let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_len) };
+        for record in parse_directory_records(&buffer).map_err(|source| {
+            CoreError::SecureEnumerationFailed {
+                path: display.to_path_buf(),
+                source,
+            }
+        })? {
+            let name = record.name.as_slice();
             if name != [46] && name != [46, 46] {
                 let name = os_string_from_wide(name);
                 let path = display.join(&name);
                 let entry = open_entry(&path, &path)?;
                 let enumerated = FileIdentity {
                     volume_serial,
-                    file_id: info.FileId.Identifier,
+                    file_id: record.file_id,
                 };
                 if !identity_matches(enumerated, entry.identity) {
                     return Err(CoreError::TargetIdentityChanged { path });
                 }
                 result.push(entry);
             }
-            if info.NextEntryOffset == 0 {
-                break;
-            }
-            offset += info.NextEntryOffset as usize;
-            if offset >= buffer.len() {
-                return Err(CoreError::SecureEnumerationFailed {
-                    path: display.to_path_buf(),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "invalid directory information offset",
-                    ),
-                });
-            }
         }
     }
     Ok(result)
+}
+
+#[derive(Debug)]
+struct ParsedDirectoryRecord {
+    name: Vec<u16>,
+    file_id: [u8; 16],
+}
+
+fn parse_directory_records(buffer: &[u8]) -> Result<Vec<ParsedDirectoryRecord>, std::io::Error> {
+    let header_size = offset_of!(FILE_ID_EXTD_DIR_INFO, FileName);
+    let next_offset_offset = offset_of!(FILE_ID_EXTD_DIR_INFO, NextEntryOffset);
+    let file_id_offset = offset_of!(FILE_ID_EXTD_DIR_INFO, FileId);
+    let name_length_offset = offset_of!(FILE_ID_EXTD_DIR_INFO, FileNameLength);
+    if header_size > size_of::<FILE_ID_EXTD_DIR_INFO>()
+        || next_offset_offset.checked_add(size_of::<u32>()).is_none()
+        || file_id_offset.checked_add(16).is_none()
+        || name_length_offset.checked_add(size_of::<u32>()).is_none()
+        || next_offset_offset + size_of::<u32>() > header_size
+        || file_id_offset + 16 > header_size
+        || name_length_offset + size_of::<u32>() > header_size
+    {
+        return Err(invalid_directory_record("invalid directory record layout"));
+    }
+
+    let mut records = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        if offset >= buffer.len() {
+            return Err(invalid_directory_record(
+                "directory record offset is out of bounds",
+            ));
+        }
+        let remaining = buffer.len() - offset;
+        if remaining < header_size {
+            return Err(invalid_directory_record(
+                "directory record header is truncated",
+            ));
+        }
+
+        let next_offset_position = offset
+            .checked_add(next_offset_offset)
+            .ok_or_else(|| invalid_directory_record("directory record offset overflows"))?;
+        let name_length_position = offset
+            .checked_add(name_length_offset)
+            .ok_or_else(|| invalid_directory_record("directory record offset overflows"))?;
+        let file_id_position = offset
+            .checked_add(file_id_offset)
+            .ok_or_else(|| invalid_directory_record("directory record offset overflows"))?;
+        let next_entry_offset = read_unaligned_at::<u32>(buffer, next_offset_position);
+        let file_name_length = read_unaligned_at::<u32>(buffer, name_length_position);
+        if !file_name_length.is_multiple_of(2) {
+            return Err(invalid_directory_record(
+                "directory record name length is odd",
+            ));
+        }
+        let name_length = file_name_length as usize;
+        let name_start = offset
+            .checked_add(header_size)
+            .ok_or_else(|| invalid_directory_record("directory record offset overflows"))?;
+        let name_end = name_start
+            .checked_add(name_length)
+            .ok_or_else(|| invalid_directory_record("directory record name length overflows"))?;
+        if name_end > buffer.len() {
+            return Err(invalid_directory_record(
+                "directory record name is out of bounds",
+            ));
+        }
+
+        let record_length = if next_entry_offset == 0 {
+            remaining
+        } else {
+            let next = next_entry_offset as usize;
+            if !next.is_multiple_of(8) || next < name_end - offset || next > remaining {
+                return Err(invalid_directory_record(
+                    "invalid directory record next offset",
+                ));
+            }
+            next
+        };
+
+        let file_id = read_unaligned_at::<[u8; 16]>(buffer, file_id_position);
+        let name = buffer[name_start..name_end]
+            .chunks_exact(2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        records.push(ParsedDirectoryRecord { name, file_id });
+
+        if next_entry_offset == 0 {
+            break;
+        }
+        offset = offset
+            .checked_add(record_length)
+            .ok_or_else(|| invalid_directory_record("directory record offset overflows"))?;
+    }
+    Ok(records)
+}
+
+fn read_unaligned_at<T: Copy>(buffer: &[u8], offset: usize) -> T {
+    // SAFETY: callers validate field bounds before reading; unaligned access is intentional.
+    unsafe { std::ptr::read_unaligned(buffer.as_ptr().add(offset).cast()) }
+}
+
+fn invalid_directory_record(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+fn map_disposition_error(path: &Path, source: std::io::Error) -> CoreError {
+    match source.raw_os_error() {
+        Some(code)
+            if code == ERROR_INVALID_FUNCTION as i32
+                || code == ERROR_NOT_SUPPORTED as i32
+                || code == ERROR_INVALID_PARAMETER as i32 =>
+        {
+            CoreError::SecureOperationUnsupported {
+                path: path.to_path_buf(),
+                operation: "Windows FileDispositionInfoEx".to_owned(),
+                source,
+            }
+        }
+        _ => CoreError::SecureDeletionFailed {
+            path: path.to_path_buf(),
+            source,
+        },
+    }
 }
 
 fn wide_path(path: &Path) -> Vec<u16> {
@@ -400,14 +515,16 @@ fn open_error_path_with_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        identity_matches, open_entry_with_access, open_error_path_with_source, open_secure_target,
-        os_string_from_wide,
+        identity_matches, map_disposition_error, open_entry_with_access,
+        open_error_path_with_source, open_secure_target, os_string_from_wide,
+        parse_directory_records,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
     use crate::model::{Category, ScanTarget};
     use std::ffi::OsString;
     use std::fs;
+    use std::mem::offset_of;
     use std::os::windows::ffi::OsStringExt;
     use std::path::PathBuf;
 
@@ -434,6 +551,97 @@ mod tests {
                 file_id: [4; 16],
             }
         ));
+    }
+
+    #[test]
+    fn malformed_directory_record_with_truncated_header_is_rejected() {
+        let header = offset_of!(
+            windows_sys::Win32::Storage::FileSystem::FILE_ID_EXTD_DIR_INFO,
+            FileName
+        );
+        let buffer = vec![0u8; header - 1];
+
+        assert!(parse_directory_records(&buffer).is_err());
+    }
+
+    #[test]
+    fn malformed_directory_record_with_odd_name_length_is_rejected() {
+        let buffer = valid_directory_record(0, 3, 0);
+
+        assert!(parse_directory_records(&buffer).is_err());
+    }
+
+    #[test]
+    fn malformed_directory_record_offsets_are_rejected() {
+        let header = offset_of!(
+            windows_sys::Win32::Storage::FileSystem::FILE_ID_EXTD_DIR_INFO,
+            FileName
+        );
+        for next_offset in [header as u32, (header + 2) as u32, 1, u32::MAX] {
+            let buffer = valid_directory_record(next_offset, 2, 0);
+            assert!(
+                parse_directory_records(&buffer).is_err(),
+                "next offset {next_offset} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_directory_record_name_slice_is_rejected() {
+        let header = offset_of!(
+            windows_sys::Win32::Storage::FileSystem::FILE_ID_EXTD_DIR_INFO,
+            FileName
+        );
+        let buffer = valid_directory_record(0, 2, header + 1);
+
+        assert!(parse_directory_records(&buffer).is_err());
+    }
+
+    #[test]
+    fn unsupported_disposition_errors_preserve_path_and_source() {
+        let path = PathBuf::from("target");
+        for code in [1, 50, 87] {
+            let error = map_disposition_error(&path, std::io::Error::from_raw_os_error(code));
+            assert!(matches!(
+                error,
+                CoreError::SecureOperationUnsupported { ref path, ref source, .. }
+                    if path == &PathBuf::from("target") && source.raw_os_error() == Some(code)
+            ));
+        }
+
+        assert!(matches!(
+            map_disposition_error(&path, std::io::Error::from_raw_os_error(5)),
+            CoreError::SecureDeletionFailed { .. }
+        ));
+    }
+
+    fn valid_directory_record(next_offset: u32, name_length: u32, buffer_length: usize) -> Vec<u8> {
+        let header = offset_of!(
+            windows_sys::Win32::Storage::FileSystem::FILE_ID_EXTD_DIR_INFO,
+            FileName
+        );
+        let length = if buffer_length == 0 {
+            header + name_length as usize
+        } else {
+            buffer_length
+        };
+        let mut buffer = vec![0u8; length];
+        write_unaligned(&mut buffer, 0, next_offset);
+        write_unaligned(
+            &mut buffer,
+            offset_of!(
+                windows_sys::Win32::Storage::FileSystem::FILE_ID_EXTD_DIR_INFO,
+                FileNameLength
+            ),
+            name_length,
+        );
+        buffer
+    }
+
+    fn write_unaligned<T: Copy>(buffer: &mut [u8], offset: usize, value: T) {
+        assert!(offset + std::mem::size_of::<T>() <= buffer.len());
+        // SAFETY: bounds are checked and the destination may be unaligned.
+        unsafe { std::ptr::write_unaligned(buffer.as_mut_ptr().add(offset).cast(), value) };
     }
 
     #[test]

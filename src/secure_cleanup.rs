@@ -59,7 +59,12 @@ impl SecureTarget {
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.delete_permanently(),
             BackendTarget::Unsupported => Err(CoreError::SecureOperationUnsupported {
+                path: std::path::PathBuf::new(),
                 operation: "permanent cleanup".to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "secure permanent cleanup backend unavailable",
+                ),
             }),
         }
     }
