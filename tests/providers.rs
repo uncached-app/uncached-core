@@ -36,9 +36,7 @@ fn all_registers_six_scanners_in_deterministic_order() {
         Category::PyCache,
         Category::Gradle,
     ];
-    assert!(expected
-        .iter()
-        .all(|category| providers.scanner_for(category.clone()).is_some()));
+    assert_eq!(providers.categories().collect::<Vec<_>>(), expected);
     assert_eq!(ProviderSet::free().len(), 1);
     assert!(ProviderSet::free()
         .scanner_for(Category::NodeModules)

@@ -109,6 +109,10 @@ impl ProviderSet {
             .find(|scanner| scanner.category() == category)
             .map(Box::as_ref)
     }
+
+    pub fn categories(&self) -> impl Iterator<Item = Category> + '_ {
+        self.scanners.iter().map(|scanner| scanner.category())
+    }
 }
 
 impl Scanner for CargoTargetScanner {
