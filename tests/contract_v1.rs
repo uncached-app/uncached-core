@@ -386,6 +386,19 @@ fn every_core_error_code_is_a_stable_snake_case_string() {
             CoreErrorCode::SecureTrashUnavailable,
             "secure_trash_unavailable",
         ),
+        (
+            CoreErrorCode::SecureTrashInitializationFailed,
+            "secure_trash_initialization_failed",
+        ),
+        (
+            CoreErrorCode::SecureTrashOperationFailed,
+            "secure_trash_operation_failed",
+        ),
+        (CoreErrorCode::SecureTrashAborted, "secure_trash_aborted"),
+        (
+            CoreErrorCode::SecureTrashPostconditionFailed,
+            "secure_trash_postcondition_failed",
+        ),
     ];
 
     for (code, expected) in cases {
@@ -434,6 +447,20 @@ fn every_public_error_preserves_contract_shape_without_native_details() {
             source: std::io::Error::other(native_detail),
         },
         CoreError::SecureTrashUnavailable,
+        CoreError::SecureTrashInitializationFailed {
+            source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureTrashOperationFailed {
+            path: "target".into(),
+            operation: "move_to_trash".into(),
+            source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureTrashAborted {
+            path: "target".into(),
+        },
+        CoreError::SecureTrashPostconditionFailed {
+            path: "target".into(),
+        },
     ];
 
     for error in errors {
@@ -448,6 +475,69 @@ fn every_public_error_preserves_contract_shape_without_native_details() {
         assert_eq!(value["data"], serde_json::Value::Null);
         assert!(value["error"].is_object());
         assert!(!value.to_string().contains(native_detail));
+    }
+}
+
+#[test]
+fn typed_trash_errors_have_stable_sanitized_contract_fields() {
+    let native_detail = "HRESULT 0x80004005 private-native-detail";
+    let cases = [
+        (
+            CoreError::SecureTrashInitializationFailed {
+                source: std::io::Error::other(native_detail),
+            },
+            "secure_trash_initialization_failed",
+            "secure Trash initialization failed",
+            None,
+            None,
+        ),
+        (
+            CoreError::SecureTrashOperationFailed {
+                path: "target".into(),
+                operation: "move_to_trash".into(),
+                source: std::io::Error::other(native_detail),
+            },
+            "secure_trash_operation_failed",
+            "secure Trash operation failed",
+            Some("target"),
+            Some("move_to_trash"),
+        ),
+        (
+            CoreError::SecureTrashAborted {
+                path: "target".into(),
+            },
+            "secure_trash_aborted",
+            "secure Trash operation was aborted",
+            Some("target"),
+            None,
+        ),
+        (
+            CoreError::SecureTrashPostconditionFailed {
+                path: "target".into(),
+            },
+            "secure_trash_postcondition_failed",
+            "secure Trash postcondition failed",
+            Some("target"),
+            None,
+        ),
+    ];
+
+    for (error, code, message, path, operation) in cases {
+        let info = error.public_info();
+        assert_eq!(serde_json::to_value(info.code).unwrap(), json!(code));
+        assert_eq!(info.message, message);
+        assert_eq!(info.path.as_deref(), path);
+        assert_eq!(info.operation.as_deref(), operation);
+
+        let value = serde_json::to_value(ApiEnvelope::<serde_json::Value>::failure(
+            Platform::Windows,
+            info,
+        ))
+        .unwrap();
+        assert_eq!(value["error"]["path"].as_str(), path);
+        assert_eq!(value["error"]["operation"].as_str(), operation);
+        assert!(!value.to_string().contains(native_detail));
+        assert!(!value.to_string().contains("HRESULT"));
     }
 }
 

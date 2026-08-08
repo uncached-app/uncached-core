@@ -19,6 +19,10 @@ pub enum CoreErrorCode {
     SecureHandleQueryFailed,
     SecureDeletionFailed,
     SecureTrashUnavailable,
+    SecureTrashInitializationFailed,
+    SecureTrashOperationFailed,
+    SecureTrashAborted,
+    SecureTrashPostconditionFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,6 +85,22 @@ pub enum CoreError {
     },
     #[error("secure Trash is unavailable")]
     SecureTrashUnavailable,
+    #[error("secure Trash initialization failed: {source}")]
+    SecureTrashInitializationFailed {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("secure Trash operation failed for {path} ({operation}): {source}")]
+    SecureTrashOperationFailed {
+        path: PathBuf,
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("secure Trash operation was aborted for {path}")]
+    SecureTrashAborted { path: PathBuf },
+    #[error("secure Trash postcondition failed for {path}")]
+    SecureTrashPostconditionFailed { path: PathBuf },
 }
 
 impl CoreError {
@@ -162,6 +182,32 @@ impl CoreError {
                 CoreErrorCode::SecureTrashUnavailable,
                 "secure Trash is unavailable",
                 None,
+                None,
+            ),
+            Self::SecureTrashInitializationFailed { .. } => (
+                CoreErrorCode::SecureTrashInitializationFailed,
+                "secure Trash initialization failed",
+                None,
+                None,
+            ),
+            Self::SecureTrashOperationFailed {
+                path, operation, ..
+            } => (
+                CoreErrorCode::SecureTrashOperationFailed,
+                "secure Trash operation failed",
+                Some(path.to_string_lossy().into_owned()),
+                Some(operation.clone()),
+            ),
+            Self::SecureTrashAborted { path } => (
+                CoreErrorCode::SecureTrashAborted,
+                "secure Trash operation was aborted",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::SecureTrashPostconditionFailed { path } => (
+                CoreErrorCode::SecureTrashPostconditionFailed,
+                "secure Trash postcondition failed",
+                Some(path.to_string_lossy().into_owned()),
                 None,
             ),
         };

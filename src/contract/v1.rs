@@ -52,6 +52,10 @@ impl<'de> Deserialize<'de> for crate::error::CoreErrorCode {
             "secure_handle_query_failed" => Ok(Self::SecureHandleQueryFailed),
             "secure_deletion_failed" => Ok(Self::SecureDeletionFailed),
             "secure_trash_unavailable" => Ok(Self::SecureTrashUnavailable),
+            "secure_trash_initialization_failed" => Ok(Self::SecureTrashInitializationFailed),
+            "secure_trash_operation_failed" => Ok(Self::SecureTrashOperationFailed),
+            "secure_trash_aborted" => Ok(Self::SecureTrashAborted),
+            "secure_trash_postcondition_failed" => Ok(Self::SecureTrashPostconditionFailed),
             value => Err(serde::de::Error::custom(format!(
                 "unknown error code: {value}"
             ))),
