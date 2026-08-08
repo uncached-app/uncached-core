@@ -64,13 +64,46 @@ pub enum Platform {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiEnvelope<T> {
     pub api_version: String,
     pub platform: Platform,
     pub data: Option<T>,
     pub error: Option<CoreErrorInfo>,
+}
+
+impl<'de, T> Deserialize<'de> for ApiEnvelope<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ApiEnvelopeFields<T> {
+            api_version: String,
+            platform: Platform,
+            data: Option<T>,
+            error: Option<CoreErrorInfo>,
+        }
+
+        let fields = ApiEnvelopeFields::deserialize(deserializer)?;
+        if fields.data.is_some() == fields.error.is_some() {
+            return Err(serde::de::Error::custom(
+                "API envelope must contain exactly one of data or error",
+            ));
+        }
+
+        Ok(Self {
+            api_version: fields.api_version,
+            platform: fields.platform,
+            data: fields.data,
+            error: fields.error,
+        })
+    }
 }
 
 impl<T> ApiEnvelope<T> {

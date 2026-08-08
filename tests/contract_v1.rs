@@ -45,6 +45,35 @@ fn failure_envelope_has_null_data_and_public_error_only() {
 }
 
 #[test]
+fn envelope_deserialization_rejects_data_and_error_together() {
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": {"value": 1},
+        "error": {
+            "code": "io",
+            "message": "I/O error",
+            "path": null,
+            "operation": null
+        }
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
+fn envelope_deserialization_rejects_data_and_error_both_missing() {
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": null,
+        "error": null
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
 fn transport_dtos_use_camel_case_and_omit_identity() {
     let found = serde_json::to_value(TargetFoundDto {
         scan_id: "scan-1".into(),
