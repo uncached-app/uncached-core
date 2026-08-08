@@ -301,11 +301,12 @@ where
             .iter()
             .find(|scanner| scanner.matches(&name) && scanner.confirm_context(&path))
             .map(|scanner| scanner.category());
+        let identity = category.as_ref().and_then(|_| file_identity(&path));
         let traversal_entry = TraversalEntry {
             path: path.clone(),
             name,
             category,
-            identity: file_identity(&path),
+            identity,
         };
         match callback(&traversal_entry) {
             TraversalControl::Prune => pruned.push(path),

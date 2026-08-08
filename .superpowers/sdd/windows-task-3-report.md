@@ -122,6 +122,36 @@ Status: DONE
 - Namespace components are intentionally not queried as ordinary filesystem ancestors because UNC/extended namespace roots may not support normal metadata lookup. Final target opening and handle validation remain fail-closed.
 - Pre-open validation cannot eliminate filesystem mutation races between component checks and handle acquisition.
 
+## Final Review Fix: Candidate-Only Identity Capture
+
+Status: DONE
+
+### Fix
+
+- `traverse_workspace` now captures `file_identity(&path)` only when provider matching returns `Some(Category)`.
+- Non-candidate traversal entries retain `identity: None`.
+- Matched candidates capture identity once and preserve existing callback, pruning, cancellation, provider scan, and cleanup behavior.
+- Public API and Unix/Windows filesystem identity implementations are unchanged.
+
+### Regression Test
+
+- Extended `scans_all_configured_provider_categories` to assert every non-candidate callback entry has `identity == None`.
+- RED: before the fix, test failed at the workspace root with `Some(FileIdentity { ... })` on a non-candidate entry.
+- GREEN: after the fix, focused test passed and candidate identity/report matching remained intact.
+
+### Verification
+
+- `cargo test scans_all_configured_provider_categories -- --nocapture`: passed, 1 passed, 0 failed.
+- `cargo test`: passed, 46 passed, 0 failed; Windows runtime tests available and passed.
+- `cargo fmt --all`: passed.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `git diff --check`: passed.
+
+### Concerns
+
+- No known concerns. Identity remains optional for matched candidates when capture itself fails, preserving existing semantics.
+
 ## Follow-Up Review Fix: Fail Closed on Ancestor Query Errors
 
 Status: DONE
