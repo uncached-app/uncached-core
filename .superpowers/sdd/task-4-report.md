@@ -31,3 +31,21 @@ Implemented in commit `5375020`.
 
 - Windows cannot rename retained target through its path while secure handles are open, so post-open replacement coverage is Unix/macOS-only.
 - Secure sizing remains partial until backend-specific verified-handle sizing exists.
+
+## Review Fixes
+
+- Restored policy-first precedence in `validate_clean_target`: provider/workspace, basename, context, and safety policy now run before captured/current identity comparison.
+- Extended the test-only post-acquisition synchronization seam to Windows.
+- Added Windows regression coverage that attempts same-basename replacement after `open_secure_target` returns, asserts native `ERROR_ACCESS_DENIED` while retained handles are open, then verifies handle-based deletion removes the original target and does not delete a replacement.
+- No path-based production deletion, Trash support, or injected helper scope changes were added.
+
+## Review Verification
+
+- `cargo test --target-dir C:\Users\srmat\AppData\Local\Temp\opencode\uncached-core-task4-review -j 1`: passed, 21 unit tests, 40 integration tests, 2 provider tests, doc tests.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --target-dir C:\Users\srmat\AppData\Local\Temp\opencode\uncached-core-task4-review --all-targets --all-features -- -D warnings`: passed.
+
+## Review Concerns
+
+- On Windows, native sharing semantics reject same-basename replacement with `ERROR_ACCESS_DENIED` while secure handles remain open; test documents and verifies this behavior.
+- Policy-first validation intentionally reports `target does not exist` before identity comparison when the selected path is missing.

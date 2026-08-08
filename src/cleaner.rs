@@ -7,17 +7,21 @@ use crate::scanner::ProviderSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(all(test, unix))]
-static SECURE_TARGET_HOOK: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
+#[cfg(all(test, any(unix, windows)))]
+type SecureTargetHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(all(test, any(unix, windows)))]
+static SECURE_TARGET_HOOK: OnceLock<Mutex<Option<SecureTargetHook>>> = OnceLock::new();
 
 pub fn validate_clean_target(
     root: &Path,
     providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<PathBuf> {
+    let canonical = validate_clean_policy(root, providers, target)?;
     let expected = target
         .identity
         .ok_or_else(|| CoreError::InvalidTarget("target filesystem identity unavailable".into()))?;
@@ -28,7 +32,6 @@ pub fn validate_clean_target(
             "target filesystem identity changed".into(),
         ));
     }
-    let canonical = validate_clean_policy(root, providers, target)?;
     Ok(canonical)
 }
 
@@ -83,7 +86,7 @@ pub fn clean_to_trash(
 ) -> CoreResult<CleanReport> {
     validate_clean_policy(root, providers, target)?;
     let secure_target = crate::secure_cleanup::open_secure_target(root, providers, target)?;
-    #[cfg(all(test, unix))]
+    #[cfg(all(test, any(unix, windows)))]
     run_secure_target_hook();
     secure_target.move_to_trash().map(|()| CleanReport {
         freed_bytes: 0,
@@ -98,7 +101,7 @@ pub fn clean_permanently(
 ) -> CoreResult<CleanReport> {
     validate_clean_policy(root, providers, target)?;
     let secure_target = crate::secure_cleanup::open_secure_target(root, providers, target)?;
-    #[cfg(all(test, unix))]
+    #[cfg(all(test, any(unix, windows)))]
     run_secure_target_hook();
     secure_target.delete_permanently()?;
     Ok(CleanReport {
@@ -107,7 +110,7 @@ pub fn clean_permanently(
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 fn install_secure_target_hook(hook: impl FnOnce() + Send + 'static) {
     *SECURE_TARGET_HOOK
         .get_or_init(|| Mutex::new(None))
@@ -115,7 +118,7 @@ fn install_secure_target_hook(hook: impl FnOnce() + Send + 'static) {
         .unwrap() = Some(Box::new(hook));
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 fn run_secure_target_hook() {
     let hook = SECURE_TARGET_HOOK
         .get_or_init(|| Mutex::new(None))
@@ -206,7 +209,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::clean_permanently;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use super::install_secure_target_hook;
     use crate::filesystem::file_identity;
     use crate::{Category, CoreError, ProviderSet, ScanTarget};
@@ -214,7 +217,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn public_cleanup_cannot_delete_same_basename_replacement() {
         let root = fixture();
         let project = root.join("project");
@@ -231,9 +234,17 @@ mod tests {
         let hook_replacement = replacement.clone();
         let hook_original = original.clone();
         install_secure_target_hook(move || {
-            fs::rename(&hook_replacement, &hook_original).unwrap();
-            fs::create_dir(&hook_replacement).unwrap();
-            fs::write(hook_replacement.join("replacement.txt"), b"replacement").unwrap();
+            #[cfg(unix)]
+            {
+                fs::rename(&hook_replacement, &hook_original).unwrap();
+                fs::create_dir(&hook_replacement).unwrap();
+                fs::write(hook_replacement.join("replacement.txt"), b"replacement").unwrap();
+            }
+            #[cfg(windows)]
+            {
+                let error = fs::rename(&hook_replacement, &hook_original).unwrap_err();
+                assert_eq!(error.raw_os_error(), Some(5));
+            }
         });
 
         let result = clean_permanently(&root, &ProviderSet::free(), &target);
@@ -241,8 +252,8 @@ mod tests {
         #[cfg(windows)]
         {
             result.unwrap();
+            assert!(!replacement.exists());
             assert!(!original.exists());
-            assert!(replacement.join("replacement.txt").exists());
         }
         #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
         {
