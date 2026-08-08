@@ -22,8 +22,8 @@ pub struct CleanupCapabilities {
 pub(crate) fn cleanup_capabilities() -> crate::contract::v1::CleanupCapabilities {
     let capabilities = backend_capabilities();
     crate::contract::v1::CleanupCapabilities {
-        permanent: capabilities.permanent,
-        trash: capabilities.trash,
+        permanent_cleanup: capabilities.permanent,
+        move_to_trash: capabilities.trash,
         secure_identity: cfg!(any(
             target_os = "linux",
             target_os = "android",

@@ -140,7 +140,8 @@ fn settled_scan_and_cleanup_dtos_have_stable_fields() {
     );
 
     let cleanup = serde_json::to_value(CleanupResultDto {
-        target_id: "target-1".into(),
+        success: true,
+        target_path: r"C:\workspace\target".into(),
         freed_bytes: 42,
         size_has_errors: false,
     })
@@ -148,7 +149,8 @@ fn settled_scan_and_cleanup_dtos_have_stable_fields() {
     assert_eq!(
         cleanup,
         json!({
-            "targetId": "target-1",
+            "success": true,
+            "targetPath": r"C:\workspace\target",
             "freedBytes": 42,
             "sizeHasErrors": false
         })
@@ -164,8 +166,8 @@ fn platform_and_capabilities_serialize_as_contract_values() {
     );
 
     let value = serde_json::to_value(CleanupCapabilities {
-        permanent: true,
-        trash: false,
+        permanent_cleanup: true,
+        move_to_trash: false,
         secure_identity: true,
     })
     .unwrap();
@@ -181,15 +183,15 @@ fn public_capabilities_reflect_current_secure_backend() {
         || cfg!(target_os = "macos");
 
     assert_eq!(capabilities.secure_identity, secure_identity_supported);
-    assert_eq!(capabilities.permanent, cfg!(windows));
-    assert!(!capabilities.trash);
+    assert_eq!(capabilities.permanent_cleanup, cfg!(windows));
+    assert!(!capabilities.move_to_trash);
 
     let value = serde_json::to_value(capabilities).unwrap();
     assert_eq!(
         value,
         json!({
-            "permanent": cfg!(windows),
-            "trash": false,
+            "permanentCleanup": cfg!(windows),
+            "moveToTrash": false,
             "secureIdentity": secure_identity_supported,
         })
     );
@@ -312,8 +314,8 @@ fn unsupported_platform_capabilities_are_fail_closed() {
     assert_eq!(
         uncached_core::cleanup_capabilities(),
         CleanupCapabilities {
-            permanent: false,
-            trash: false,
+            permanent_cleanup: false,
+            move_to_trash: false,
             secure_identity: false,
         }
     );

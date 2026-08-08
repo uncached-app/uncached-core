@@ -31,13 +31,13 @@ All fields below are serialized with the shown camelCase names.
 
 ```json
 {
-  "permanent": true,
-  "trash": false,
+  "permanentCleanup": true,
+  "moveToTrash": false,
   "secureIdentity": true
 }
 ```
 
-`permanent` and `trash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection.
+`permanentCleanup` and `moveToTrash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection.
 
 ### `ScanTargetDto`
 
@@ -62,6 +62,11 @@ All fields below are serialized with the shown camelCase names.
 This is Core's domain transport DTO. It does not describe every field in the
 Desktop event payload.
 
+`ScanTargetDto::from_settled` is restricted to targets whose sizing lifecycle has
+settled. Its `sizePending` and `sizeHasErrors` values are therefore both false.
+Desktop scan events use their own DTO when they need to preserve live sizing
+state.
+
 ### `TargetSizedDto`
 
 ```json
@@ -84,10 +89,16 @@ Desktop event payload.
 ### `CleanupResultDto`
 
 ```json
-{ "targetId": "target-1", "freedBytes": 42, "sizeHasErrors": false }
+{
+  "success": true,
+  "targetPath": "C:\\workspace\\target",
+  "freedBytes": 42,
+  "sizeHasErrors": false
+}
 ```
 
-The cleanup DTO intentionally excludes target paths, mode, and command-only result fields.
+This Core DTO has exactly these four required fields. Desktop cleanup events
+intentionally use a separate event DTO and may omit `targetPath`.
 
 ## Errors
 

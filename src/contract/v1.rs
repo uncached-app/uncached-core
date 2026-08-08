@@ -145,8 +145,8 @@ impl<T> ApiEnvelope<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanupCapabilities {
-    pub permanent: bool,
-    pub trash: bool,
+    pub permanent_cleanup: bool,
+    pub move_to_trash: bool,
     pub secure_identity: bool,
 }
 
@@ -160,8 +160,9 @@ pub struct ScanTargetDto {
     pub size_has_errors: bool,
 }
 
-impl From<&ScanTarget> for ScanTargetDto {
-    fn from(target: &ScanTarget) -> Self {
+impl ScanTargetDto {
+    /// Converts a Core target after its sizing lifecycle has settled.
+    pub fn from_settled(target: &ScanTarget) -> Self {
         Self {
             path: target.path.to_string_lossy().into_owned(),
             category: target.category.clone(),
@@ -202,15 +203,17 @@ pub struct ScanFinishedDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanupResultDto {
-    pub target_id: String,
+    pub success: bool,
+    pub target_path: String,
     pub freed_bytes: u64,
     pub size_has_errors: bool,
 }
 
 impl From<(String, CleanReport)> for CleanupResultDto {
-    fn from((target_id, report): (String, CleanReport)) -> Self {
+    fn from((target_path, report): (String, CleanReport)) -> Self {
         Self {
-            target_id,
+            success: true,
+            target_path,
             freed_bytes: report.freed_bytes,
             size_has_errors: report.size_has_errors,
         }
