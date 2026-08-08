@@ -68,15 +68,47 @@ pub fn file_identity(path: &Path) -> Option<FileIdentity> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let mut file_id = [0; 16];
+        file_id[..8].copy_from_slice(&metadata.ino().to_le_bytes());
         Some(FileIdentity {
-            first: metadata.dev(),
-            second: metadata.ino(),
+            volume_serial: metadata.dev(),
+            file_id,
         })
     }
     #[cfg(not(unix))]
     {
         let _ = metadata;
         None
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::file_identity;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_identity_maps_unix_device_and_inode() {
+        let path = unique_test_path();
+        fs::write(&path, b"identity").expect("test file should be created");
+
+        let metadata = fs::symlink_metadata(&path).expect("test file metadata should exist");
+        let identity = file_identity(&path).expect("test file should have identity");
+
+        assert_eq!(identity.volume_serial, metadata.dev());
+        assert_eq!(identity.file_id[..8], metadata.ino().to_le_bytes());
+        assert_eq!(identity.file_id[8..], [0; 8]);
+
+        fs::remove_file(path).expect("test file should be removed");
+    }
+
+    fn unique_test_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "uncached-core-file-identity-{}",
+            std::process::id()
+        ))
     }
 }
 

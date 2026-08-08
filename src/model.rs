@@ -36,8 +36,50 @@ pub struct ScanTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileIdentity {
-    pub first: u64,
-    pub second: u64,
+    pub volume_serial: u64,
+    pub file_id: [u8; 16],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileIdentity;
+
+    #[test]
+    fn file_identity_round_trips_through_json() {
+        let identity = FileIdentity {
+            volume_serial: 42,
+            file_id: [7; 16],
+        };
+
+        let encoded = serde_json::to_string(&identity).expect("identity should serialize");
+        let decoded: FileIdentity =
+            serde_json::from_str(&encoded).expect("identity should deserialize");
+
+        assert_eq!(decoded, identity);
+    }
+
+    #[test]
+    fn file_identity_detects_volume_and_file_id_mismatches() {
+        let identity = FileIdentity {
+            volume_serial: 42,
+            file_id: [7; 16],
+        };
+
+        assert_ne!(
+            identity,
+            FileIdentity {
+                volume_serial: 43,
+                file_id: [7; 16],
+            }
+        );
+        assert_ne!(
+            identity,
+            FileIdentity {
+                volume_serial: 42,
+                file_id: [8; 16],
+            }
+        );
+    }
 }
 
 impl ScanTarget {
