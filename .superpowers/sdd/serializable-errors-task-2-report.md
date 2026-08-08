@@ -51,3 +51,23 @@ This report and test expansion are included in the Task 2 commit.
 ## Concerns
 
 None. `CoreError` remains non-Serialize; only `CoreErrorInfo` is serialized. Native source details remain available through rich `CoreError` diagnostics and are excluded from public JSON.
+
+## Review Follow-up
+
+Fixed review findings against head `18d0062`.
+
+- Replaced the tautological Io Display before/after comparison with the explicit literal `I/O error: private-native-detail-7f3c`.
+- Asserted `public_info()` leaves Io Display and source text unchanged.
+- Added explicit Display and `Error::source` assertions for `SecureOperationUnsupported`, `SecureTargetOpenFailed`, `SecureEnumerationFailed`, `SecureHandleQueryFailed`, and `SecureDeletionFailed`.
+- Kept native source details absent from DTO JSON and sanitized public messages; no production code changed.
+
+## Review Follow-up Verification
+
+| Command | Result |
+| --- | --- |
+| Deliberate RED focused Io assertion | Expected failure: actual Display differed from intentionally incorrect literal |
+| Focused Display/source tests | PASS: 2 tests |
+| `cargo test` | PASS: 38 unit, 41 `node_modules`, 2 provider, and 0 doc-tests; 0 failed |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo clippy --all-targets --all-features -- -D warnings` | PASS |
+| `git diff --check` | PASS |

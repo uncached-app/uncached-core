@@ -487,14 +487,71 @@ mod tests {
     #[test]
     fn public_info_preserves_display_and_source_behavior() {
         let error = CoreError::Io(io_error());
-        let display = error.to_string();
+        let display_before = error.to_string();
+        let source_before = error.source().unwrap().to_string();
         assert!(error.source().is_some());
 
         let info = error.public_info();
 
         assert_eq!(info.message, "I/O error");
-        assert!(error.source().is_some());
-        assert_eq!(error.to_string(), display);
+        assert_eq!(display_before, "I/O error: private-native-detail-7f3c");
+        assert_eq!(source_before, "private-native-detail-7f3c");
+        assert_eq!(error.to_string(), "I/O error: private-native-detail-7f3c");
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "private-native-detail-7f3c"
+        );
+    }
+
+    #[test]
+    fn secure_error_display_and_source_behavior_are_explicit() {
+        let cases = [
+            (
+                CoreError::SecureOperationUnsupported {
+                    path: "target".into(),
+                    operation: "delete".into(),
+                    source: io_error(),
+                },
+                "secure operation unsupported for target (delete): private-native-detail-7f3c",
+            ),
+            (
+                CoreError::SecureTargetOpenFailed {
+                    path: "target".into(),
+                    source: io_error(),
+                },
+                "secure target open failed for target: private-native-detail-7f3c",
+            ),
+            (
+                CoreError::SecureEnumerationFailed {
+                    path: "target".into(),
+                    source: io_error(),
+                },
+                "secure enumeration failed for target: private-native-detail-7f3c",
+            ),
+            (
+                CoreError::SecureHandleQueryFailed {
+                    path: "target".into(),
+                    operation: "query",
+                    source: io_error(),
+                },
+                "secure handle query failed for target (query): private-native-detail-7f3c",
+            ),
+            (
+                CoreError::SecureDeletionFailed {
+                    path: "target".into(),
+                    source: io_error(),
+                },
+                "secure deletion failed for target: private-native-detail-7f3c",
+            ),
+        ];
+
+        for (error, expected_display) in cases {
+            assert_eq!(error.to_string(), expected_display);
+            assert_eq!(
+                error.source().unwrap().to_string(),
+                "private-native-detail-7f3c"
+            );
+        }
     }
 
     #[test]
