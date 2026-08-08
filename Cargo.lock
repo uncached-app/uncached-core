@@ -445,6 +445,7 @@ name = "uncached-core"
 version = "0.1.0"
 dependencies = [
  "jwalk",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

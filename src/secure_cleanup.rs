@@ -3,6 +3,9 @@ use crate::model::ScanTarget;
 use crate::scanner::ProviderSet;
 use std::path::Path;
 
+#[cfg(unix)]
+mod unix;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleanupCapabilities {
     pub permanent: bool,
@@ -11,6 +14,8 @@ pub struct CleanupCapabilities {
 
 #[derive(Debug)]
 enum BackendTarget {
+    #[cfg(unix)]
+    Unix(unix::UnixTarget),
     Unsupported,
 }
 
@@ -20,7 +25,9 @@ pub(crate) struct SecureTarget {
 
 impl SecureTarget {
     pub(crate) fn capabilities(&self) -> CleanupCapabilities {
-        match self.backend {
+        match &self.backend {
+            #[cfg(unix)]
+            BackendTarget::Unix(target) => target.capabilities(),
             BackendTarget::Unsupported => CleanupCapabilities {
                 permanent: false,
                 trash: false,
@@ -30,6 +37,8 @@ impl SecureTarget {
 
     pub(crate) fn delete_permanently(self) -> CoreResult<()> {
         match self.backend {
+            #[cfg(unix)]
+            BackendTarget::Unix(target) => target.delete_permanently(),
             BackendTarget::Unsupported => Err(CoreError::SecureOperationUnsupported {
                 operation: "permanent cleanup".to_owned(),
             }),
@@ -38,13 +47,15 @@ impl SecureTarget {
 
     pub(crate) fn move_to_trash(self) -> CoreResult<()> {
         match self.backend {
+            #[cfg(unix)]
+            BackendTarget::Unix(target) => target.move_to_trash(),
             BackendTarget::Unsupported => Err(CoreError::SecureTrashUnavailable),
         }
     }
 }
 
 pub(crate) fn open_secure_target(
-    _root: &Path,
+    root: &Path,
     _providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<SecureTarget> {
@@ -54,9 +65,20 @@ pub(crate) fn open_secure_target(
         });
     }
 
-    Ok(SecureTarget {
-        backend: BackendTarget::Unsupported,
-    })
+    #[cfg(unix)]
+    {
+        return Ok(SecureTarget {
+            backend: BackendTarget::Unix(unix::open_secure_target(root, target)?),
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Ok(SecureTarget {
+            backend: BackendTarget::Unsupported,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +134,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(unix))]
     fn secure_target_is_consumed_by_operation() {
         let secure_target = open_secure_target(
             PathBuf::from("root").as_path(),
