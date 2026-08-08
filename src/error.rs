@@ -33,6 +33,13 @@ pub enum CoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("secure handle query failed for {path} ({operation}): {source}")]
+    SecureHandleQueryFailed {
+        path: PathBuf,
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("secure deletion failed for {path}: {source}")]
     SecureDeletionFailed {
         path: PathBuf,

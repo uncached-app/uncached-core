@@ -1,17 +1,18 @@
 use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 use std::ffi::c_void;
+use std::ffi::OsString;
 use std::mem::{size_of, MaybeUninit};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, FileIdBothDirectoryInfo, GetFileInformationByHandleEx,
+    CreateFileW, FileAttributeTagInfo, FileIdExtdDirectoryInfo, GetFileInformationByHandleEx,
     SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAG_POSIX_SEMANTICS, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
+    FILE_FLAG_POSIX_SEMANTICS, FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 
@@ -29,6 +30,7 @@ impl Drop for Handle {
 struct Entry {
     handle: Handle,
     is_directory: bool,
+    identity: FileIdentity,
     path: PathBuf,
 }
 
@@ -94,8 +96,8 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
 
     let mut ancestors = Vec::new();
     let mut current = root.to_path_buf();
-    let root_handle = open_directory(root, &target.path)?;
-    ancestors.push(root_handle);
+    let root_entry = open_directory(root, &target.path)?;
+    ancestors.push(root_entry.handle);
     for component in &components[..components.len() - 1] {
         let Component::Normal(name) = component else {
             return Err(open_error(
@@ -104,7 +106,7 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
             ));
         };
         current.push(name);
-        ancestors.push(open_directory(&current, &target.path)?);
+        ancestors.push(open_directory(&current, &target.path)?.handle);
     }
 
     let target_path = current.join(basename);
@@ -131,7 +133,8 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
 
 fn collect_entries(entry: Entry, entries: &mut Vec<Entry>) -> CoreResult<()> {
     if entry.is_directory {
-        let children = enumerate_directory(entry.handle.0, &entry.path)?;
+        let children =
+            enumerate_directory(entry.handle.0, &entry.path, entry.identity.volume_serial)?;
         entries.push(entry);
         for child in children {
             collect_entries(child, entries)?;
@@ -142,7 +145,7 @@ fn collect_entries(entry: Entry, entries: &mut Vec<Entry>) -> CoreResult<()> {
     Ok(())
 }
 
-fn open_directory(path: &Path, display: &Path) -> CoreResult<Handle> {
+fn open_directory(path: &Path, display: &Path) -> CoreResult<Entry> {
     let entry = open_entry(path, display)?;
     if !entry.is_directory {
         return Err(open_error_path(
@@ -150,7 +153,7 @@ fn open_directory(path: &Path, display: &Path) -> CoreResult<Handle> {
             "path component is not a directory",
         ));
     }
-    Ok(entry.handle)
+    Ok(entry)
 }
 
 fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
@@ -190,8 +193,10 @@ fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
             path: display.to_path_buf(),
         });
     }
+    let identity = identity_from_handle(handle.0, display)?;
     Ok(Entry {
         is_directory: attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+        identity,
         handle,
         path: path.to_path_buf(),
     })
@@ -209,7 +214,11 @@ fn attributes_from_handle(handle: HANDLE, path: &Path) -> CoreResult<FILE_ATTRIB
         )
     } == 0
     {
-        return Err(open_error_path(path, "cannot read handle attributes"));
+        return Err(CoreError::SecureHandleQueryFailed {
+            path: path.to_path_buf(),
+            operation: "attributes",
+            source: std::io::Error::last_os_error(),
+        });
     }
     // SAFETY: successful API call initialized buffer.
     Ok(unsafe { info.assume_init() })
@@ -227,7 +236,11 @@ fn identity_from_handle(handle: HANDLE, path: &Path) -> CoreResult<FileIdentity>
         )
     } == 0
     {
-        return Err(open_error_path(path, "cannot read handle identity"));
+        return Err(CoreError::SecureHandleQueryFailed {
+            path: path.to_path_buf(),
+            operation: "identity",
+            source: std::io::Error::last_os_error(),
+        });
     }
     // SAFETY: successful API call initialized buffer.
     let info = unsafe { info.assume_init() };
@@ -237,7 +250,11 @@ fn identity_from_handle(handle: HANDLE, path: &Path) -> CoreResult<FileIdentity>
     })
 }
 
-fn enumerate_directory(handle: HANDLE, display: &Path) -> CoreResult<Vec<Entry>> {
+fn enumerate_directory(
+    handle: HANDLE,
+    display: &Path,
+    volume_serial: u64,
+) -> CoreResult<Vec<Entry>> {
     let mut buffer = vec![0u8; 64 * 1024];
     let mut result = Vec::new();
     loop {
@@ -245,7 +262,7 @@ fn enumerate_directory(handle: HANDLE, display: &Path) -> CoreResult<Vec<Entry>>
         let ok = unsafe {
             GetFileInformationByHandleEx(
                 handle,
-                FileIdBothDirectoryInfo,
+                FileIdExtdDirectoryInfo,
                 buffer.as_mut_ptr() as *mut c_void,
                 buffer.len() as u32,
             )
@@ -263,14 +280,20 @@ fn enumerate_directory(handle: HANDLE, display: &Path) -> CoreResult<Vec<Entry>>
         let mut offset = 0usize;
         loop {
             // SAFETY: Windows returns aligned entries whose offset stays within buffer.
-            let info = unsafe { &*(buffer.as_ptr().add(offset) as *const FILE_ID_BOTH_DIR_INFO) };
+            let info = unsafe { &*(buffer.as_ptr().add(offset) as *const FILE_ID_EXTD_DIR_INFO) };
             let name_len = info.FileNameLength as usize / 2;
             let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_len) };
             if name != [46] && name != [46, 46] {
-                let name = String::from_utf16_lossy(name);
+                let name = os_string_from_wide(name);
                 let path = display.join(&name);
                 let entry = open_entry(&path, &path)?;
-                let _ = identity_from_handle(entry.handle.0, &path)?;
+                let enumerated = FileIdentity {
+                    volume_serial,
+                    file_id: info.FileId.Identifier,
+                };
+                if !identity_matches(enumerated, entry.identity) {
+                    return Err(CoreError::TargetIdentityChanged { path });
+                }
                 result.push(entry);
             }
             if info.NextEntryOffset == 0 {
@@ -298,6 +321,14 @@ fn wide_path(path: &Path) -> Vec<u16> {
         .collect()
 }
 
+fn os_string_from_wide(name: &[u16]) -> OsString {
+    OsString::from_wide(name)
+}
+
+fn identity_matches(enumerated: FileIdentity, opened: FileIdentity) -> bool {
+    enumerated == opened
+}
+
 fn open_error(target: &ScanTarget, message: &str) -> CoreError {
     open_error_path(&target.path, message)
 }
@@ -311,12 +342,39 @@ fn open_error_path(path: &Path, message: &str) -> CoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::open_secure_target;
+    use super::{identity_matches, open_secure_target, os_string_from_wide};
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
     use crate::model::{Category, ScanTarget};
+    use std::ffi::OsString;
     use std::fs;
+    use std::os::windows::ffi::OsStringExt;
     use std::path::PathBuf;
+
+    #[test]
+    fn directory_record_name_preserves_unpaired_utf16_units() {
+        let name = os_string_from_wide(&[b'f' as u16, 0xd800, b'x' as u16]);
+        assert_eq!(
+            name,
+            OsString::from_wide(&[b'f' as u16, 0xd800, b'x' as u16])
+        );
+    }
+
+    #[test]
+    fn directory_record_identity_must_match_open_handle() {
+        let expected = crate::model::FileIdentity {
+            volume_serial: 7,
+            file_id: [3; 16],
+        };
+        assert!(identity_matches(expected, expected));
+        assert!(!identity_matches(
+            expected,
+            crate::model::FileIdentity {
+                volume_serial: 7,
+                file_id: [4; 16],
+            }
+        ));
+    }
 
     #[test]
     fn secure_open_retains_stable_identity_and_enables_permanent_cleanup() {
