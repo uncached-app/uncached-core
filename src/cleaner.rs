@@ -16,6 +16,21 @@ pub fn validate_clean_target(
     let scanner = providers
         .scanner_for(target.category.clone())
         .ok_or_else(|| CoreError::InvalidTarget("missing provider".into()))?;
+    #[cfg(windows)]
+    {
+        let expected = target.identity.ok_or_else(|| {
+            CoreError::InvalidTarget("target filesystem identity unavailable".into())
+        })?;
+        let actual = file_identity(&target.path).ok_or_else(|| {
+            CoreError::InvalidTarget("target filesystem identity unavailable".into())
+        })?;
+        if expected != actual {
+            return Err(CoreError::InvalidTarget(
+                "target filesystem identity changed".into(),
+            ));
+        }
+    }
+    #[cfg(not(windows))]
     if let (Some(expected), Some(actual)) = (target.identity, file_identity(&target.path)) {
         if expected != actual {
             return Err(CoreError::InvalidTarget(
