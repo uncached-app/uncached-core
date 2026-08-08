@@ -100,3 +100,31 @@ passed
 ```
 
 The focused Unix test command was rerun after implementation and failed at the same missing Linux linker boundary. `git diff --check` passed before commit.
+
+## Revised Architecture Fixes
+
+- Removed `unlinkat` wrappers and recursive destructive traversal. Unix backend now retains permanent capability `false` and returns `SecureOperationUnsupported` before any mutation.
+- Kept recursive FD-relative traversal as validation-only; regular files are observed without opening them as directories, while symlinks and directory-open failures remain rejected.
+- `readdir` now clears and checks thread-local errno, distinguishing EOF from enumeration failure and returning `SecureEnumerationFailed` on error.
+- Retained real Unix tests for identity mismatch, direct symlink, symlinked ancestor, unsupported deletion with no mutation and false capabilities, plus nested validation traversal.
+
+## Revised Verification
+
+Windows host:
+
+```text
+cargo test
+9 unit tests passed, 39 node_modules tests passed, 2 provider tests passed, 0 failed
+
+cargo fmt --all -- --check
+passed
+```
+
+Unix cross-check:
+
+```text
+cargo check --target x86_64-unknown-linux-gnu
+Finished `dev` profile
+```
+
+Unix runtime tests remain unavailable on this Windows host because the Linux linker `cc` is not installed. No Unix runtime pass is claimed.

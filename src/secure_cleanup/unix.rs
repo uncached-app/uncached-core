@@ -198,47 +198,6 @@ fn invalid_input(message: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
 }
 
-/// Reads one directory entry without following its name.
-fn stat_entry_at(parent: RawFd, name: &CString, display: &Path) -> CoreResult<libc::stat> {
-    // SAFETY: zeroed libc::stat is valid initialized storage for fstatat.
-    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
-    // SAFETY: `parent` is a valid directory FD, `name` is NUL-free, and
-    // `metadata` is writable initialized storage.
-    if unsafe {
-        libc::fstatat(
-            parent,
-            name.as_ptr(),
-            &mut metadata,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } != 0
-    {
-        return Err(CoreError::SecureEnumerationFailed {
-            path: display.to_path_buf(),
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    Ok(metadata)
-}
-
-/// Removes one already-classified child relative to its verified parent FD.
-fn unlink_entry_at(
-    parent: RawFd,
-    name: &CString,
-    directory: bool,
-    display: &Path,
-) -> CoreResult<()> {
-    let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
-    // SAFETY: `parent` is a valid directory FD and `name` is NUL-free.
-    if unsafe { libc::unlinkat(parent, name.as_ptr(), flags) } != 0 {
-        return Err(CoreError::SecureDeletionFailed {
-            path: display.to_path_buf(),
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    Ok(())
-}
-
 /// Enumerates children through a directory FD; returned names contain no NUL.
 fn enumerate_children(parent: RawFd, display: &Path) -> CoreResult<Vec<CString>> {
     let duplicate = duplicate_fd(parent, display)?;
@@ -256,9 +215,19 @@ fn enumerate_children(parent: RawFd, display: &Path) -> CoreResult<Vec<CString>>
 
     let mut names = Vec::new();
     loop {
+        set_errno(0);
         // SAFETY: `stream` is a live DIR* owned until closed below.
         let entry = unsafe { libc::readdir(stream) };
         if entry.is_null() {
+            let errno = errno();
+            if errno != 0 {
+                // SAFETY: stream remains live and is closed exactly once here.
+                unsafe { libc::closedir(stream) };
+                return Err(CoreError::SecureEnumerationFailed {
+                    path: display.to_path_buf(),
+                    source: std::io::Error::from_raw_os_error(errno),
+                });
+            }
             break;
         }
         // SAFETY: d_name is NUL-terminated by readdir and valid until next call.
@@ -277,31 +246,57 @@ fn enumerate_children(parent: RawFd, display: &Path) -> CoreResult<Vec<CString>>
     Ok(names)
 }
 
-/// Recursively removes children relative to `parent`, rejecting symlink entries.
-fn remove_children(parent: RawFd, display: &Path) -> CoreResult<()> {
+/// Recursively validates children relative to `parent`, rejecting symlink entries.
+fn validate_children(parent: RawFd, display: &Path) -> CoreResult<()> {
     for name in enumerate_children(parent, display)? {
         let child_display = display.join(name.to_string_lossy().as_ref());
-        let metadata = stat_entry_at(parent, &name, &child_display)?;
-        let mode = metadata.st_mode & libc::S_IFMT;
-        if mode == libc::S_IFLNK {
-            return Err(CoreError::TargetReparsePoint {
-                path: child_display,
-            });
-        }
-        if mode == libc::S_IFDIR {
-            let child = open_directory_at(parent, name.as_bytes(), &child_display)?;
-            remove_children(child.as_raw_fd(), &child_display)?;
-            unlink_entry_at(parent, &name, true, &child_display)?;
-        } else {
-            unlink_entry_at(parent, &name, false, &child_display)?;
+        let child = match open_directory_at(parent, name.as_bytes(), &child_display) {
+            Ok(child) => Some(child),
+            Err(CoreError::SecureTargetOpenFailed { source, .. })
+                if source.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(child) = child {
+            validate_children(child.as_raw_fd(), &child_display)?;
         }
     }
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn set_errno(value: libc::c_int) {
+    // SAFETY: libc exposes thread-local errno storage for these targets.
+    unsafe { *libc::__errno_location() = value };
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn errno() -> libc::c_int {
+    // SAFETY: libc exposes thread-local errno storage for these targets.
+    unsafe { *libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+fn set_errno(value: libc::c_int) {
+    // SAFETY: libc exposes thread-local errno storage for macOS.
+    unsafe { *libc::__error() = value };
+}
+
+#[cfg(target_os = "macos")]
+fn errno() -> libc::c_int {
+    // SAFETY: libc exposes thread-local errno storage for macOS.
+    unsafe { *libc::__error() }
+}
+
+#[cfg(test)]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+compile_error!("Unix secure cleanup requires a supported errno accessor");
+
 #[cfg(test)]
 mod tests {
-    use super::{open_directory_at, open_secure_target, remove_children};
+    use super::{open_directory_at, open_secure_target, validate_children};
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
     use crate::model::{Category, ScanTarget};
@@ -370,6 +365,13 @@ mod tests {
             .with_identity(file_identity(&target_path));
         let secure_target =
             open_secure_target(&fixture.root, &target).expect("identity-bound target should open");
+        assert_eq!(
+            secure_target.capabilities(),
+            super::super::CleanupCapabilities {
+                permanent: false,
+                trash: false,
+            }
+        );
 
         assert!(matches!(
             secure_target.delete_permanently(),
@@ -379,8 +381,8 @@ mod tests {
     }
 
     #[test]
-    fn removes_nested_children_relative_to_verified_directory_fd() {
-        let fixture = Fixture::new("recursive-delete");
+    fn validates_nested_children_relative_to_verified_directory_fd() {
+        let fixture = Fixture::new("recursive-validation");
         let target_path = fixture.root.join("target");
         fs::create_dir(&target_path).expect("target should exist");
         fs::create_dir(target_path.join("nested")).expect("nested directory should exist");
@@ -394,11 +396,12 @@ mod tests {
             open_directory_at(secure_target._parent.as_raw_fd(), b"target", &target_path)
                 .expect("nested target should open");
 
-        remove_children(target_fd.as_raw_fd(), &target_path).expect("children should be removed");
+        validate_children(target_fd.as_raw_fd(), &target_path)
+            .expect("nested children should validate");
         assert!(fs::read_dir(&target_path)
             .expect("target should remain readable")
             .next()
-            .is_none());
+            .is_some());
     }
 
     struct Fixture {
