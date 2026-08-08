@@ -64,9 +64,9 @@ pub fn directory_size_report(root: &Path) -> CoreResult<DirectorySizeReport> {
 }
 
 pub fn file_identity(path: &Path) -> Option<FileIdentity> {
-    let metadata = fs::symlink_metadata(path).ok()?;
     #[cfg(unix)]
     {
+        let metadata = fs::symlink_metadata(path).ok()?;
         use std::os::unix::fs::MetadataExt;
         let mut file_id = [0; 16];
         file_id[..8].copy_from_slice(&metadata.ino().to_le_bytes());
@@ -75,11 +75,101 @@ pub fn file_identity(path: &Path) -> Option<FileIdentity> {
             file_id,
         })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = metadata;
+        windows_file_identity(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         None
     }
+}
+
+#[cfg(windows)]
+fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_128, FILE_ID_INFO,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    struct Handle(HANDLE);
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    let path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let _handle = Handle(handle);
+
+    let mut attributes = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    let attributes_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&mut attributes as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    } != 0;
+    if !attributes_ok
+        || attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return None;
+    }
+
+    let mut information = FILE_ID_INFO {
+        VolumeSerialNumber: 0,
+        FileId: FILE_ID_128 {
+            Identifier: [0; 16],
+        },
+    };
+    let information_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut information as *mut FILE_ID_INFO).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } != 0;
+    if !information_ok {
+        return None;
+    }
+
+    Some(FileIdentity {
+        volume_serial: information.VolumeSerialNumber,
+        file_id: information.FileId.Identifier,
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -109,6 +199,47 @@ mod tests {
             "uncached-core-file-identity-{}",
             std::process::id()
         ))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::file_identity;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_identity_reads_real_directory_identity() {
+        let path = fixture_directory("stable");
+        let first = file_identity(&path).expect("directory should have identity");
+        let second = file_identity(&path).expect("directory identity should remain readable");
+
+        assert_eq!(first, second);
+        cleanup_fixture(path);
+    }
+
+    #[test]
+    fn file_identity_returns_none_for_missing_directory() {
+        let path = fixture_path("missing");
+
+        assert_eq!(file_identity(&path), None);
+    }
+
+    fn fixture_directory(label: &str) -> PathBuf {
+        let path = fixture_path(label);
+        fs::create_dir(&path).expect("fixture directory should be created");
+        path
+    }
+
+    fn fixture_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "uncached-core-file-identity-{label}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn cleanup_fixture(path: PathBuf) {
+        fs::remove_dir(path).expect("fixture directory should be removed");
     }
 }
 
