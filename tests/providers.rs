@@ -114,7 +114,7 @@ fn all_scanners_require_expected_context_and_reject_bare_cargo_target() {
 }
 
 #[test]
-fn each_configured_provider_ignores_same_basename_decoy_contexts() {
+fn contextual_providers_reject_same_basename_decoy_contexts() {
     let root = fixture();
 
     fs::create_dir_all(root.join("node-valid/node_modules")).unwrap();
@@ -133,12 +133,6 @@ fn each_configured_provider_ignores_same_basename_decoy_contexts() {
     fs::write(root.join("turbo-valid/package.json"), b"{}").unwrap();
     fs::create_dir_all(root.join("turbo-invalid/.turbo")).unwrap();
 
-    fs::create_dir_all(root.join("python-valid/__pycache__")).unwrap();
-    fs::create_dir_all(root.join("gradle-valid/.gradle")).unwrap();
-
-    fs::create_dir_all(root.join(".git/python-invalid/__pycache__")).unwrap();
-    fs::create_dir_all(root.join(".git/gradle-invalid/.gradle")).unwrap();
-
     let mut found = Vec::new();
     let cancelled = AtomicBool::new(false);
     traverse_workspace(&root, &ProviderSet::all(), &cancelled, |entry| {
@@ -154,10 +148,8 @@ fn each_configured_provider_ignores_same_basename_decoy_contexts() {
     found.sort_by(|left, right| left.0.cmp(&right.0));
     let expected = [
         ("cargo-valid/target", Category::CargoTarget),
-        ("gradle-valid/.gradle", Category::Gradle),
         ("next-valid/.next", Category::NextJs),
         ("node-valid/node_modules", Category::NodeModules),
-        ("python-valid/__pycache__", Category::PyCache),
         ("turbo-valid/.turbo", Category::Turbo),
     ]
     .into_iter()
@@ -165,5 +157,53 @@ fn each_configured_provider_ignores_same_basename_decoy_contexts() {
     .collect::<Vec<_>>();
 
     assert_eq!(found, expected);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn context_free_providers_accept_reachable_same_basename_directories() {
+    let root = fixture();
+
+    fs::create_dir_all(root.join("python-valid/__pycache__")).unwrap();
+    fs::create_dir_all(root.join("python-invalid/__pycache__")).unwrap();
+    fs::create_dir_all(root.join("gradle-valid/.gradle")).unwrap();
+    fs::create_dir_all(root.join("gradle-invalid/.gradle")).unwrap();
+
+    let found = categories(&root, &ProviderSet::all());
+    assert_eq!(
+        found
+            .iter()
+            .filter(|category| **category == Category::PyCache)
+            .count(),
+        2
+    );
+    assert_eq!(
+        found
+            .iter()
+            .filter(|category| **category == Category::Gradle)
+            .count(),
+        2
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn git_subtrees_are_pruned_before_provider_matching() {
+    let root = fixture();
+    fs::create_dir_all(root.join(".git/fake-python/__pycache__")).unwrap();
+    fs::create_dir_all(root.join(".git/fake-gradle/.gradle")).unwrap();
+
+    let mut visited = Vec::new();
+    let cancelled = AtomicBool::new(false);
+    traverse_workspace(&root, &ProviderSet::all(), &cancelled, |entry| {
+        visited.push(entry.path.clone());
+        TraversalControl::Continue
+    })
+    .unwrap();
+
+    assert!(!visited
+        .iter()
+        .any(|path| path.starts_with(root.join(".git"))));
     let _ = fs::remove_dir_all(root);
 }

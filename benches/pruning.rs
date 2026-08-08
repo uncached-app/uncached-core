@@ -149,6 +149,19 @@ fn candidate_fixture() -> PathBuf {
 
 fn callback_only_discovery(c: &mut Criterion) {
     let root = candidate_fixture();
+    let cancelled = AtomicBool::new(false);
+    let mut expected_candidates = 0usize;
+    traverse_workspace(&root, &ProviderSet::free(), &cancelled, |entry| {
+        if entry.category.is_some() {
+            expected_candidates += 1;
+            TraversalControl::Prune
+        } else {
+            TraversalControl::Continue
+        }
+    })
+    .unwrap();
+    assert_eq!(expected_candidates, 16);
+
     let mut group = c.benchmark_group("candidate_discovery");
     group.bench_function("callback_only", |b| {
         b.iter(|| {
