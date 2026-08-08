@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use uncached_core::{scan_workspace, Category, ProviderSet, ScanOutcome};
+use uncached_core::{traverse_workspace, Category, ProviderSet, TraversalControl};
 
 fn fixture() -> PathBuf {
     let root = std::env::temp_dir().join(format!("uncached-core-providers-{}", std::process::id()));
@@ -11,16 +11,18 @@ fn fixture() -> PathBuf {
 }
 
 fn categories(root: &Path, providers: &ProviderSet) -> Vec<Category> {
-    let ScanOutcome::Completed(report) =
-        scan_workspace(root, providers, &AtomicBool::new(false)).unwrap()
-    else {
-        panic!("scan unexpectedly cancelled");
-    };
-    report
-        .targets
-        .into_iter()
-        .map(|target| target.category)
-        .collect()
+    let cancelled = AtomicBool::new(false);
+    let mut found = Vec::new();
+    traverse_workspace(root, providers, &cancelled, |entry| {
+        if let Some(category) = entry.category.clone() {
+            found.push(category);
+            TraversalControl::Prune
+        } else {
+            TraversalControl::Continue
+        }
+    })
+    .unwrap();
+    found
 }
 
 #[test]
