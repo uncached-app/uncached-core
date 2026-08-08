@@ -70,3 +70,27 @@ Date: 2026-08-08
 
 - Linux and macOS runtime tests remain unavailable on this Windows host; Linux cross-check is compile-only.
 - Existing repository-local `target-*` directories are unrelated untracked build artifacts and were not modified or removed.
+
+## Final Review Follow-up
+
+Date: 2026-08-08
+
+### Finding Fixed
+
+- In `src/secure_cleanup/unix.rs` and `src/secure_cleanup/macos.rs`, `fdopendir` failure now captures `std::io::Error::last_os_error()` before closing the descriptor. The captured native error is returned as `SecureEnumerationFailed` source; cleanup can no longer overwrite it.
+- No security semantics, capability flags, or platform dispatch changed.
+
+### Test Coverage
+
+- No deterministic runtime unit test was added for this branch: Unix/macOS modules are cfg-excluded on the Windows host, and forcing `fdopendir` failure without mocking libc would not reliably distinguish errno captured before versus after `close`.
+- Windows full tests and cross-target compilation provide build coverage; native Unix/macOS runtime coverage remains unavailable on this host.
+
+### Verification
+
+| Command | Result | Evidence |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | PASS | Exit code 0; no output |
+| `cargo test -j 1` | PASS | 30 unit tests, 41 `node_modules` tests, 2 provider tests, 2 doc tests; 0 failures |
+| `cargo clippy --all-targets --all-features -- -D warnings` | PASS | Exit code 0; no warnings |
+| `cargo check --target x86_64-unknown-linux-gnu` | PASS | Exit code 0 using isolated serial target |
+| `git diff --check` | PASS | Exit code 0 |

@@ -212,11 +212,12 @@ fn enumerate_children(parent: RawFd, display: &Path) -> CoreResult<Vec<CString>>
     // SAFETY: `directory` is a valid descriptor transferred to fdopendir.
     let stream = unsafe { libc::fdopendir(directory) };
     if stream.is_null() {
+        let source = std::io::Error::last_os_error();
         // SAFETY: fdopendir failed and retains ownership of descriptor.
         unsafe { libc::close(directory) };
         return Err(CoreError::SecureEnumerationFailed {
             path: display.to_path_buf(),
-            source: std::io::Error::last_os_error(),
+            source,
         });
     }
 

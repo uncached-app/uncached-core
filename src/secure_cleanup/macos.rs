@@ -182,9 +182,13 @@ fn validate_children(parent: RawFd, display: &Path) -> CoreResult<()> {
     // SAFETY: raw descriptor ownership transfers to fdopendir.
     let stream = unsafe { libc::fdopendir(raw) };
     if stream.is_null() {
+        let source = std::io::Error::last_os_error();
         // SAFETY: fdopendir failed and retained descriptor ownership.
         unsafe { libc::close(raw) };
-        return Err(enumeration_error(display));
+        return Err(CoreError::SecureEnumerationFailed {
+            path: display.to_path_buf(),
+            source,
+        });
     }
     loop {
         // SAFETY: __error returns macOS thread-local errno storage.
@@ -227,13 +231,6 @@ fn validate_children(parent: RawFd, display: &Path) -> CoreResult<()> {
                 return Err(error);
             }
         }
-    }
-}
-
-fn enumeration_error(path: &Path) -> CoreError {
-    CoreError::SecureEnumerationFailed {
-        path: path.to_path_buf(),
-        source: std::io::Error::last_os_error(),
     }
 }
 
