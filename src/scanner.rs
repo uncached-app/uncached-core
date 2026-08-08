@@ -196,17 +196,24 @@ impl Default for ProviderSet {
     }
 }
 
+#[cfg(feature = "bench")]
+#[derive(Default)]
+pub struct PrunedPaths {
+    paths: HashSet<PathBuf>,
+}
+
+#[cfg(not(feature = "bench"))]
 #[derive(Default)]
 struct PrunedPaths {
     paths: HashSet<PathBuf>,
 }
 
 impl PrunedPaths {
-    fn insert(&mut self, path: PathBuf) {
+    pub fn insert(&mut self, path: PathBuf) {
         self.paths.insert(path);
     }
 
-    fn contains_ancestor(&self, path: &Path) -> bool {
+    pub fn contains_ancestor(&self, path: &Path) -> bool {
         path.ancestors()
             .any(|ancestor| self.paths.contains(ancestor))
     }

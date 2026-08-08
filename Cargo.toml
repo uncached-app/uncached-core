@@ -3,6 +3,9 @@ name = "uncached-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+bench = []
+
 [dependencies]
 libc = "0.2"
 jwalk = "0.8"
@@ -18,4 +21,10 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
 serde_json = "1"
+
+[[bench]]
+name = "pruning"
+harness = false
+required-features = ["bench"]
