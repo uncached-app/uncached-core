@@ -85,25 +85,42 @@ pub enum CoreError {
 
 impl CoreError {
     pub fn public_info(&self) -> CoreErrorInfo {
-        let message = self.to_string();
-        let (code, path, operation) = match self {
-            Self::InvalidWorkspace(_) => (CoreErrorCode::InvalidWorkspace, None, None),
-            Self::InvalidTarget(_) => (CoreErrorCode::InvalidTarget, None, None),
-            Self::Io(_) => (CoreErrorCode::Io, None, None),
-            Self::Trash(_) => (CoreErrorCode::Trash, None, None),
-            Self::RecycleBinTooLarge => (CoreErrorCode::RecycleBinTooLarge, None, None),
+        let (code, message, path, operation) = match self {
+            Self::InvalidWorkspace(_) => (
+                CoreErrorCode::InvalidWorkspace,
+                "invalid workspace",
+                None,
+                None,
+            ),
+            Self::InvalidTarget(_) => (
+                CoreErrorCode::InvalidTarget,
+                "invalid scan target",
+                None,
+                None,
+            ),
+            Self::Io(_) => (CoreErrorCode::Io, "I/O error", None, None),
+            Self::Trash(_) => (CoreErrorCode::Trash, "trash error", None, None),
+            Self::RecycleBinTooLarge => (
+                CoreErrorCode::RecycleBinTooLarge,
+                "target is too large for the Recycle Bin",
+                None,
+                None,
+            ),
             Self::TargetIdentityUnavailable { path } => (
                 CoreErrorCode::TargetIdentityUnavailable,
+                "target identity unavailable",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
             Self::TargetIdentityChanged { path } => (
                 CoreErrorCode::TargetIdentityChanged,
+                "target identity changed",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
             Self::TargetReparsePoint { path } => (
                 CoreErrorCode::TargetReparsePoint,
+                "target or ancestor is a reparse point or symlink",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
@@ -111,16 +128,19 @@ impl CoreError {
                 path, operation, ..
             } => (
                 CoreErrorCode::SecureOperationUnsupported,
+                "secure operation unsupported",
                 Some(path.to_string_lossy().into_owned()),
                 Some(operation.clone()),
             ),
             Self::SecureTargetOpenFailed { path, .. } => (
                 CoreErrorCode::SecureTargetOpenFailed,
+                "secure target open failed",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
             Self::SecureEnumerationFailed { path, .. } => (
                 CoreErrorCode::SecureEnumerationFailed,
+                "secure enumeration failed",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
@@ -128,20 +148,27 @@ impl CoreError {
                 path, operation, ..
             } => (
                 CoreErrorCode::SecureHandleQueryFailed,
+                "secure handle query failed",
                 Some(path.to_string_lossy().into_owned()),
                 Some((*operation).to_owned()),
             ),
             Self::SecureDeletionFailed { path, .. } => (
                 CoreErrorCode::SecureDeletionFailed,
+                "secure deletion failed",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
-            Self::SecureTrashUnavailable => (CoreErrorCode::SecureTrashUnavailable, None, None),
+            Self::SecureTrashUnavailable => (
+                CoreErrorCode::SecureTrashUnavailable,
+                "secure Trash is unavailable",
+                None,
+                None,
+            ),
         };
 
         CoreErrorInfo {
             code,
-            message,
+            message: message.to_owned(),
             path,
             operation,
         }
@@ -157,7 +184,10 @@ mod tests {
     use std::error::Error;
 
     fn io_error() -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "native detail")
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private-native-detail-7f3c",
+        )
     }
 
     #[test]
@@ -342,19 +372,27 @@ mod tests {
             path: "target".into(),
             source: io_error(),
         };
-        let expected_message = error.to_string();
+        let display = error.to_string();
         let json = serde_json::to_value(error.public_info()).unwrap();
+        let json_text = json.to_string();
 
         assert_eq!(
             json,
             json!({
                 "code": "secure_target_open_failed",
-                "message": expected_message,
+                "message": "secure target open failed",
                 "path": "target",
                 "operation": null,
             })
         );
         assert!(!json.as_object().unwrap().contains_key("source"));
+        assert!(!json_text.contains("private-native-detail-7f3c"));
+        assert!(!json_text.contains("Permission denied"));
+        assert_eq!(
+            display,
+            "secure target open failed for target: private-native-detail-7f3c"
+        );
+        assert!(error.source().is_some());
     }
 
     #[test]
@@ -365,7 +403,7 @@ mod tests {
 
         let info = error.public_info();
 
-        assert_eq!(info.message, display);
+        assert_eq!(info.message, "I/O error");
         assert!(error.source().is_some());
         assert_eq!(error.to_string(), display);
     }
