@@ -183,12 +183,158 @@ fn public_capabilities_reflect_current_secure_backend() {
     assert_eq!(capabilities.secure_identity, secure_identity_supported);
     assert_eq!(capabilities.permanent, cfg!(windows));
     assert!(!capabilities.trash);
+
+    let value = serde_json::to_value(capabilities).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "permanent": cfg!(windows),
+            "trash": false,
+            "secureIdentity": secure_identity_supported,
+        })
+    );
 }
 
 #[test]
-fn core_error_codes_remain_snake_case() {
+fn every_core_error_code_is_a_stable_snake_case_string() {
+    let cases = [
+        (CoreErrorCode::InvalidWorkspace, "invalid_workspace"),
+        (CoreErrorCode::InvalidTarget, "invalid_target"),
+        (CoreErrorCode::Io, "io"),
+        (CoreErrorCode::Trash, "trash"),
+        (CoreErrorCode::RecycleBinTooLarge, "recycle_bin_too_large"),
+        (
+            CoreErrorCode::TargetIdentityUnavailable,
+            "target_identity_unavailable",
+        ),
+        (
+            CoreErrorCode::TargetIdentityChanged,
+            "target_identity_changed",
+        ),
+        (CoreErrorCode::TargetReparsePoint, "target_reparse_point"),
+        (
+            CoreErrorCode::SecureOperationUnsupported,
+            "secure_operation_unsupported",
+        ),
+        (
+            CoreErrorCode::SecureTargetOpenFailed,
+            "secure_target_open_failed",
+        ),
+        (
+            CoreErrorCode::SecureEnumerationFailed,
+            "secure_enumeration_failed",
+        ),
+        (
+            CoreErrorCode::SecureHandleQueryFailed,
+            "secure_handle_query_failed",
+        ),
+        (
+            CoreErrorCode::SecureDeletionFailed,
+            "secure_deletion_failed",
+        ),
+        (
+            CoreErrorCode::SecureTrashUnavailable,
+            "secure_trash_unavailable",
+        ),
+    ];
+
+    for (code, expected) in cases {
+        assert_eq!(serde_json::to_value(code).unwrap(), json!(expected));
+    }
+}
+
+#[test]
+fn every_public_error_preserves_contract_shape_without_native_details() {
+    let native_detail = "private-native-detail";
+    let errors = [
+        CoreError::InvalidWorkspace(native_detail.into()),
+        CoreError::InvalidTarget(native_detail.into()),
+        CoreError::Io(std::io::Error::other(native_detail)),
+        CoreError::Trash(native_detail.into()),
+        CoreError::RecycleBinTooLarge,
+        CoreError::TargetIdentityUnavailable {
+            path: "target".into(),
+        },
+        CoreError::TargetIdentityChanged {
+            path: "target".into(),
+        },
+        CoreError::TargetReparsePoint {
+            path: "target".into(),
+        },
+        CoreError::SecureOperationUnsupported {
+            path: "target".into(),
+            operation: "permanent_cleanup".into(),
+            source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureTargetOpenFailed {
+            path: "target".into(),
+            source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureEnumerationFailed {
+            path: "target".into(),
+            source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureHandleQueryFailed {
+            path: "target".into(),
+            operation: "identity",
+            source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureDeletionFailed {
+            path: "target".into(),
+            source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureTrashUnavailable,
+    ];
+
+    for error in errors {
+        let info = error.public_info();
+        let value = serde_json::to_value(ApiEnvelope::<serde_json::Value>::failure(
+            Platform::Unsupported,
+            info.clone(),
+        ))
+        .unwrap();
+
+        assert!(serde_json::to_value(info.code).unwrap().is_string());
+        assert_eq!(value["data"], serde_json::Value::Null);
+        assert!(value["error"].is_object());
+        assert!(!value.to_string().contains(native_detail));
+    }
+}
+
+#[test]
+fn unsupported_cleanup_operations_fail_closed_with_operation_keys() {
+    let permanent = CoreError::SecureOperationUnsupported {
+        path: "target".into(),
+        operation: "permanent_cleanup".into(),
+        source: std::io::Error::other("private-native-detail"),
+    }
+    .public_info();
+    assert_eq!(permanent.code, CoreErrorCode::SecureOperationUnsupported);
+    assert_eq!(permanent.operation.as_deref(), Some("permanent_cleanup"));
+    assert!(!serde_json::to_value(&permanent)
+        .unwrap()
+        .to_string()
+        .contains("private-native-detail"));
+
+    let trash = CoreError::SecureTrashUnavailable.public_info();
+    assert_eq!(trash.code, CoreErrorCode::SecureTrashUnavailable);
+    assert_eq!(trash.operation, None);
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos"
+)))]
+#[test]
+fn unsupported_platform_capabilities_are_fail_closed() {
     assert_eq!(
-        serde_json::to_value(CoreErrorCode::SecureTrashUnavailable).unwrap(),
-        "secure_trash_unavailable"
+        uncached_core::cleanup_capabilities(),
+        CleanupCapabilities {
+            permanent: false,
+            trash: false,
+            secure_identity: false,
+        }
     );
 }
