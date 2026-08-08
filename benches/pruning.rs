@@ -11,7 +11,7 @@ const CASES: &[&str] = &["first-ancestor-hit", "last-ancestor-hit", "miss"];
 struct Fixture {
     entries: Vec<PathBuf>,
     baseline_pruned: Vec<PathBuf>,
-    optimized_pruned: PrunedPaths,
+    hybrid_pruned: PrunedPaths,
 }
 
 fn baseline_contains(pruned: &[PathBuf], path: &Path) -> bool {
@@ -37,16 +37,16 @@ fn lookup_path(case: &str, pruned_count: usize, depth: usize) -> PathBuf {
 
 fn fixture(entry_count: usize, pruned_count: usize, depth: usize, case: &str) -> Fixture {
     let baseline_pruned: Vec<_> = (0..pruned_count).map(target_path).collect();
-    let mut optimized_pruned = PrunedPaths::default();
+    let mut hybrid_pruned = PrunedPaths::default();
     for path in &baseline_pruned {
-        optimized_pruned.insert(path.clone());
+        hybrid_pruned.insert(path.clone());
     }
     let path = lookup_path(case, pruned_count, depth);
     let entries = vec![path; entry_count];
     Fixture {
         entries,
         baseline_pruned,
-        optimized_pruned,
+        hybrid_pruned,
     }
 }
 
@@ -78,15 +78,14 @@ fn pruning_lookup(c: &mut Criterion) {
                         },
                     );
                     group.bench_with_input(
-                        BenchmarkId::new("optimized", &id),
+                        BenchmarkId::new("hybrid", &id),
                         &fixture,
                         |b, fixture| {
                             b.iter(|| {
                                 let mut hits = 0usize;
                                 for path in &fixture.entries {
-                                    hits +=
-                                        black_box(fixture.optimized_pruned.contains_ancestor(path))
-                                            as usize;
+                                    hits += black_box(fixture.hybrid_pruned.contains_ancestor(path))
+                                        as usize;
                                 }
                                 black_box(hits)
                             });

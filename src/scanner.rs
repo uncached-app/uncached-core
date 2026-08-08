@@ -196,26 +196,48 @@ impl Default for ProviderSet {
     }
 }
 
-#[cfg(feature = "bench")]
+const PRUNED_PATH_INDEX_THRESHOLD: usize = 8;
+
 #[derive(Default)]
+#[cfg(feature = "bench")]
 pub struct PrunedPaths {
-    paths: HashSet<PathBuf>,
+    paths: Vec<PathBuf>,
+    index: Option<HashSet<PathBuf>>,
 }
 
-#[cfg(not(feature = "bench"))]
 #[derive(Default)]
+#[cfg(not(feature = "bench"))]
 struct PrunedPaths {
-    paths: HashSet<PathBuf>,
+    paths: Vec<PathBuf>,
+    index: Option<HashSet<PathBuf>>,
 }
 
 impl PrunedPaths {
     pub fn insert(&mut self, path: PathBuf) {
-        self.paths.insert(path);
+        if let Some(index) = &mut self.index {
+            index.insert(path);
+            return;
+        }
+
+        if self.paths.iter().any(|existing| existing == &path) {
+            return;
+        }
+        self.paths.push(path);
+        if self.paths.len() > PRUNED_PATH_INDEX_THRESHOLD {
+            self.index = Some(self.paths.iter().cloned().collect());
+        }
     }
 
     pub fn contains_ancestor(&self, path: &Path) -> bool {
-        path.ancestors()
-            .any(|ancestor| self.paths.contains(ancestor))
+        match &self.index {
+            Some(index) => path.ancestors().any(|ancestor| index.contains(ancestor)),
+            None => self.paths.iter().any(|pruned| path.starts_with(pruned)),
+        }
+    }
+
+    #[cfg(test)]
+    fn uses_index(&self) -> bool {
+        self.index.is_some()
     }
 }
 
@@ -370,7 +392,7 @@ fn is_tooling_node_modules(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::PrunedPaths;
+    use super::{PrunedPaths, PRUNED_PATH_INDEX_THRESHOLD};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -393,5 +415,28 @@ mod tests {
         empty.insert(PathBuf::from("/repo"));
         empty.insert(PathBuf::from("/repo/node_modules"));
         assert!(empty.contains_ancestor(Path::new("/repo/node_modules/file")));
+    }
+
+    #[test]
+    fn pruned_lookup_uses_linear_mode_for_small_sets() {
+        let mut pruned = PrunedPaths::default();
+        for target in 0..PRUNED_PATH_INDEX_THRESHOLD {
+            pruned.insert(PathBuf::from(format!("/repo/target-{target}")));
+        }
+
+        assert!(!pruned.uses_index());
+        assert!(pruned.contains_ancestor(Path::new("/repo/target-0/file")));
+    }
+
+    #[test]
+    fn pruned_lookup_switches_to_indexed_mode_after_threshold() {
+        let mut pruned = PrunedPaths::default();
+        for target in 0..=PRUNED_PATH_INDEX_THRESHOLD {
+            pruned.insert(PathBuf::from(format!("/repo/target-{target}")));
+        }
+
+        assert!(pruned.uses_index());
+        assert!(pruned.contains_ancestor(Path::new("/repo/target-0/file")));
+        assert!(!pruned.contains_ancestor(Path::new("/repo/target-0-cache/file")));
     }
 }
