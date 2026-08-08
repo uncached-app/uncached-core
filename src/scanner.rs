@@ -4,6 +4,7 @@ use crate::filesystem::{
 };
 use crate::model::{Category, ScanOutcome, ScanReport, ScanTarget, TraversalOutcome};
 use jwalk::{Parallelism, WalkDir};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -195,6 +196,22 @@ impl Default for ProviderSet {
     }
 }
 
+#[derive(Default)]
+struct PrunedPaths {
+    paths: HashSet<PathBuf>,
+}
+
+impl PrunedPaths {
+    fn insert(&mut self, path: PathBuf) {
+        self.paths.insert(path);
+    }
+
+    fn contains_ancestor(&self, path: &Path) -> bool {
+        path.ancestors()
+            .any(|ancestor| self.paths.contains(ancestor))
+    }
+}
+
 pub fn scan_workspace(
     root: &Path,
     providers: &ProviderSet,
@@ -283,17 +300,14 @@ where
         })
         .into_iter();
     let providers = &providers.scanners;
-    let mut pruned = Vec::new();
+    let mut pruned = PrunedPaths::default();
     for result in entries {
         if cancelled.load(Ordering::Acquire) {
             return Ok(TraversalOutcome::Cancelled);
         }
         let entry = result.map_err(|error| CoreError::Io(error.into()))?;
         let path = entry.path();
-        if pruned
-            .iter()
-            .any(|ancestor: &PathBuf| path.starts_with(ancestor))
-        {
+        if pruned.contains_ancestor(&path) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -309,7 +323,7 @@ where
             identity,
         };
         match callback(&traversal_entry) {
-            TraversalControl::Prune => pruned.push(path),
+            TraversalControl::Prune => pruned.insert(path),
             TraversalControl::Cancel => return Ok(TraversalOutcome::Cancelled),
             TraversalControl::Continue => {}
         }
@@ -345,4 +359,32 @@ fn is_tooling_node_modules(path: &Path) -> bool {
                 .chars()
                 .all(|character| character.is_ascii_digit() || character == '.')
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrunedPaths;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn pruned_lookup_respects_path_components() {
+        let mut pruned = PrunedPaths::default();
+        pruned.insert(PathBuf::from("/repo/node_modules"));
+
+        assert!(pruned.contains_ancestor(Path::new("/repo/node_modules")));
+        assert!(pruned.contains_ancestor(Path::new("/repo/node_modules/pkg/file")));
+        assert!(pruned.contains_ancestor(Path::new("/repo/node_modules/pkg/deep/file")));
+        assert!(!pruned.contains_ancestor(Path::new("/repo/node_modules-cache/file")));
+        assert!(!pruned.contains_ancestor(Path::new("/other/node_modules/file")));
+    }
+
+    #[test]
+    fn pruned_lookup_handles_empty_and_nested_paths() {
+        let mut empty = PrunedPaths::default();
+        assert!(!empty.contains_ancestor(Path::new("/repo/node_modules/file")));
+
+        empty.insert(PathBuf::from("/repo"));
+        empty.insert(PathBuf::from("/repo/node_modules"));
+        assert!(empty.contains_ancestor(Path::new("/repo/node_modules/file")));
+    }
 }
