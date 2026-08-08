@@ -12,13 +12,20 @@ The Criterion group compares the previous linear `Vec<PathBuf>` lookup with
 the production hybrid lookup. Sets up to eight unique targets use linear
 `Path::starts_with`; larger sets use `HashSet<PathBuf>` plus
 `Path::ancestors()`. Fixtures are deterministic and generated outside timed
-closures. Workloads vary across 1,000, 100,000, and 1,000,000 entries; 1, 32,
+closures. The default complete matrix uses 1,000 and 100,000 entries; 1, 32,
 and 1,024 pruned targets; depths 4, 12, and 32; and first-hit, last-hit, and
 miss cases. Throughput is reported as entries per second.
 
-The complete matrix is intentionally opt-in. On the development host, the
-high-cardinality baseline last-hit cases make a full default Criterion run
-impractical. A bounded smoke run on the current hybrid implementation measured
+The 1,000,000-entry stress workload remains available without making normal
+verification impractical:
+
+```text
+UNCACHED_RUN_STRESS_BENCH=1 cargo bench --features bench --bench pruning
+```
+
+The stress matrix is intentionally opt-in. On the development host, the
+high-cardinality baseline last-hit cases make it impractical as a default run.
+The practical matrix is complete and suitable for normal verification. A bounded smoke run on the current hybrid implementation measured
 the following cases. These observations are host-specific and are not general
 performance claims:
 
@@ -54,9 +61,9 @@ cargo bench --bench pruning --features bench candidate_discovery -- --warm-up-ti
 It measured `candidate_discovery/callback_only` at
 `[14.361 ms 14.596 ms 14.983 ms]` on this host. Criterion reported that the
 short smoke configuration needed about 883 ms to collect all 10 samples; this
-result is an observation, not a cross-host performance target. The full matrix
-command compiled and began execution but was stopped after 360 seconds because
-high-cardinality cases exceed the available verification window.
+result is an observation, not a cross-host performance target. The default
+practical matrix is complete. The opt-in stress matrix is excluded from normal
+verification because high-cardinality cases exceed the available window.
 
 Sizing is a Desktop lifecycle concern rather than part of this core benchmark:
 Desktop caps sizing workers at 8, uses a bounded queue, and reports completion

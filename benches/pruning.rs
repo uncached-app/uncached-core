@@ -6,7 +6,8 @@ use std::sync::atomic::AtomicBool;
 use uncached_core::scanner::PrunedPaths;
 use uncached_core::{traverse_workspace, ProviderSet, TraversalControl};
 
-const ENTRY_COUNTS: &[usize] = &[1_000, 100_000, 1_000_000];
+const PRACTICAL_ENTRY_COUNTS: &[usize] = &[1_000, 100_000];
+const STRESS_ENTRY_COUNTS: &[usize] = &[1_000, 100_000, 1_000_000];
 const PRUNED_COUNTS: &[usize] = &[1, 32, 1_024];
 const DEPTHS: &[usize] = &[4, 12, 32];
 const CASES: &[&str] = &["first-ancestor-hit", "last-ancestor-hit", "miss"];
@@ -55,8 +56,13 @@ fn fixture(entry_count: usize, pruned_count: usize, depth: usize, case: &str) ->
 
 fn pruning_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("pruning_lookup");
+    let entry_counts = if std::env::var_os("UNCACHED_RUN_STRESS_BENCH").is_some() {
+        STRESS_ENTRY_COUNTS
+    } else {
+        PRACTICAL_ENTRY_COUNTS
+    };
 
-    for &entry_count in ENTRY_COUNTS {
+    for &entry_count in entry_counts {
         for &pruned_count in PRUNED_COUNTS {
             for &depth in DEPTHS {
                 for &case in CASES {
