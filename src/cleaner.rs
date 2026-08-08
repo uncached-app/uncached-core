@@ -68,6 +68,44 @@ pub fn clean_to_trash(
     })
 }
 
+pub fn clean_permanently(
+    root: &Path,
+    providers: &ProviderSet,
+    target: &ScanTarget,
+) -> CoreResult<CleanReport> {
+    clean_permanently_with_delete_and_size(
+        root,
+        providers,
+        target,
+        |path| directory_size_report(path).map(|report| (report.bytes, report.errors > 0)),
+        |path| fs::remove_dir_all(path).map_err(CoreError::from),
+    )
+}
+
+pub fn clean_permanently_with_delete_and_size<S, F>(
+    root: &Path,
+    providers: &ProviderSet,
+    target: &ScanTarget,
+    mut size: S,
+    delete: F,
+) -> CoreResult<CleanReport>
+where
+    S: FnMut(&Path) -> CoreResult<(u64, bool)>,
+    F: FnOnce(&Path) -> CoreResult<()>,
+{
+    let canonical = validate_clean_target(root, providers, target)?;
+    let (freed_bytes, size_has_errors) = match size(&canonical) {
+        Ok((bytes, has_errors)) => (bytes, has_errors),
+        Err(_) => (0, true),
+    };
+    let canonical = validate_clean_target(root, providers, target)?;
+    delete(&canonical)?;
+    Ok(CleanReport {
+        freed_bytes,
+        size_has_errors,
+    })
+}
+
 pub fn clean_to_trash_with_delete<F>(
     root: &Path,
     providers: &ProviderSet,
