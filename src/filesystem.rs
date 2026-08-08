@@ -92,10 +92,11 @@ fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_128, FILE_ID_INFO,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FileAttributeTagInfo, FileIdInfo, GetFileAttributesW,
+        GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_ID_128, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
     struct Handle(HANDLE);
@@ -106,6 +107,24 @@ fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
                 CloseHandle(self.0);
             }
         }
+    }
+
+    if path.ancestors().any(|ancestor| {
+        if ancestor.as_os_str().is_empty() {
+            return false;
+        }
+        if fs::symlink_metadata(ancestor).is_err() {
+            return true;
+        }
+        let ancestor: Vec<u16> = ancestor
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let attributes = unsafe { GetFileAttributesW(ancestor.as_ptr()) };
+        attributes == u32::MAX || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }) {
+        return None;
     }
 
     let path: Vec<u16> = path
@@ -207,6 +226,7 @@ mod windows_tests {
     use super::file_identity;
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
 
     #[test]
     fn file_identity_reads_real_directory_identity() {
@@ -223,6 +243,32 @@ mod windows_tests {
         let path = fixture_path("missing");
 
         assert_eq!(file_identity(&path), None);
+    }
+
+    #[test]
+    fn file_identity_returns_none_when_parent_is_a_reparse_point() {
+        let real = fixture_path("reparse-real");
+        let link = fixture_path("reparse-link");
+        let target = link.join("target");
+        fs::create_dir_all(real.join("target")).expect("real target should be created");
+        if !Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&real)
+            .status()
+            .expect("junction command should start")
+            .success()
+        {
+            fs::remove_dir_all(real).expect("real fixture should be removed");
+            return;
+        }
+
+        assert_eq!(file_identity(&target), None);
+
+        fs::remove_dir(link).expect("reparse fixture should be removed");
+        fs::remove_dir_all(real).expect("real fixture should be removed");
     }
 
     fn fixture_directory(label: &str) -> PathBuf {
