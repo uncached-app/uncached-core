@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented Task 1 on core main at HEAD `9372b21`.
+Implemented Task 1 and review fixes on core main at HEAD `84b8f13`.
 
 ## Changes
 
@@ -46,6 +46,40 @@ cargo fmt --all -- --check  # final formatting check
 
 The full core test run included 37 unit tests, 41 integration tests, and 2 doc tests.
 
+## Review Fix
+
+- Sanitized `CoreErrorInfo.message` to stable variant-level public text.
+- Kept path and operation context in their structured fields.
+- Preserved native source text in `CoreError` `Display` and `Error::source` behavior.
+- Added regression assertions using unique private native detail and native source formatting.
+
+## Updated TDD Evidence
+
+RED command:
+
+```text
+cargo test error::tests
+```
+
+RED result: 2 tests failed because `public_info` still serialized native source text in `message`.
+
+GREEN command:
+
+```text
+cargo test error::tests
+```
+
+GREEN result: 7 passed, 0 failed.
+
+## Updated Verification
+
+```text
+cargo test error::tests       # 7 passed, 0 failed
+cargo test                    # 37 unit + 41 integration + 2 doc = 80 passed, 0 failed
+cargo fmt --all               # completed successfully
+cargo fmt --all -- --check    # completed successfully
+```
+
 ## Concern
 
-Secure `Display` messages intentionally include native source text because the approved contract requires `CoreErrorInfo.message` to equal existing `Display` output. Native sources are not represented as a separate serialized field; the DTO contains only the four approved fields and `CoreError` remains non-serializable.
+None. Native source details remain available through `CoreError` for logs and debugging but do not enter serialized `CoreErrorInfo` JSON.
