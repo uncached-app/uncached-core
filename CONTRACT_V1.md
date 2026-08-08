@@ -53,11 +53,14 @@ All fields below are serialized with the shown camelCase names.
 
 `FileIdentity` is deliberately absent. `category` is the Core `Category` enum: `NodeModules`, `CargoTarget`, `NextJs`, `Turbo`, `PyCache`, `Gradle`, `DotNetObj`, `Docker`, or `Custom(String)`.
 
-### `TargetFoundDto`
+### Core `TargetFoundDto`
 
 ```json
 { "scanId": "scan-1", "target": { "path": "...", "category": "NodeModules", "sizeBytes": 123, "sizePending": true, "sizeHasErrors": false } }
 ```
+
+This is Core's domain transport DTO. It does not describe every field in the
+Desktop event payload.
 
 ### `TargetSizedDto`
 
@@ -118,7 +121,9 @@ secure_deletion_failed
 secure_trash_unavailable
 ```
 
-`message` is a stable public summary. `path` and `operation` are optional public context and may be null. Native error sources, private filesystem details, and `FileIdentity` never serialize into `error`.
+`message` is a stable public summary. `path` and `operation` are required keys
+whose values may be strings or null. Native error sources, private filesystem
+details, and `FileIdentity` never serialize into `error`.
 
 ## Event names
 
@@ -137,7 +142,13 @@ clean:finished
 clean:failed
 ```
 
-`scan:finished` carries `ScanFinishedDto`. `scan:target_found` carries `TargetFoundDto`. `scan:target_sized` carries `TargetSizedDto`. Cleanup success carries `CleanupResultDto`. Failure events carry an error envelope with null data. `clean:finished` is the shipped success name; `clean:success` is not part of v1.
+`scan:finished` carries `ScanFinishedDto`. Core's `TargetFoundDto` is the
+domain shape for `scan:target_found`; Desktop wraps that shape in its
+Desktop-specific target-found DTO, adding `id`, `name`, `formattedSize`, and
+nullable `lastModified`. `scan:target_sized` carries `TargetSizedDto`. Cleanup
+success carries `CleanupResultDto`. Failure events carry an error envelope with
+null data. `clean:finished` is the shipped success name; `clean:success` is not
+part of v1.
 
 ## Version and migration policy
 
