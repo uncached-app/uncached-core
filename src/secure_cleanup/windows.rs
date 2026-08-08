@@ -178,11 +178,12 @@ fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
     // valid desired access for every regular-file provider.
     let handle = open(DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY);
     if handle != INVALID_HANDLE_VALUE {
-        return open_entry_with_handle(handle, path, display, true);
+        return open_entry_with_handle(handle, path, display, true, None);
     }
+    let required_access_error = std::io::Error::last_os_error();
     let handle = open(DELETE | FILE_READ_ATTRIBUTES);
     if handle != INVALID_HANDLE_VALUE {
-        return open_entry_with_handle(handle, path, display, false);
+        return open_entry_with_handle(handle, path, display, false, Some(required_access_error));
     }
     Err(CoreError::SecureTargetOpenFailed {
         path: display.to_path_buf(),
@@ -215,7 +216,7 @@ fn open_entry_with_access(
             source: std::io::Error::last_os_error(),
         });
     }
-    open_entry_with_handle(handle, path, display, can_enumerate)
+    open_entry_with_handle(handle, path, display, can_enumerate, None)
 }
 
 fn open_entry_with_handle(
@@ -223,6 +224,7 @@ fn open_entry_with_handle(
     path: &Path,
     display: &Path,
     can_enumerate: bool,
+    required_access_error: Option<std::io::Error>,
 ) -> CoreResult<Entry> {
     let handle = Handle(handle);
     let attributes = attributes_from_handle(handle.0, display)?;
@@ -233,9 +235,10 @@ fn open_entry_with_handle(
     }
     let is_directory = attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
     if is_directory && !can_enumerate {
-        return Err(open_error_path(
+        return Err(open_error_path_with_source(
             display,
             "directory handle lacks enumeration access",
+            required_access_error,
         ));
     }
     let identity = identity_from_handle(handle.0, display)?;
@@ -379,16 +382,26 @@ fn open_error(target: &ScanTarget, message: &str) -> CoreError {
 }
 
 fn open_error_path(path: &Path, message: &str) -> CoreError {
+    open_error_path_with_source(path, message, None)
+}
+
+fn open_error_path_with_source(
+    path: &Path,
+    message: &str,
+    source: Option<std::io::Error>,
+) -> CoreError {
     CoreError::SecureTargetOpenFailed {
         path: path.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, message),
+        source: source
+            .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, message)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        identity_matches, open_entry_with_access, open_secure_target, os_string_from_wide,
+        identity_matches, open_entry_with_access, open_error_path_with_source, open_secure_target,
+        os_string_from_wide,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
@@ -439,6 +452,23 @@ mod tests {
             ),
             Err(CoreError::SecureTargetOpenFailed { .. })
         ));
+    }
+
+    #[test]
+    fn directory_access_rejection_preserves_required_open_error() {
+        let path = PathBuf::from("target");
+        let error = open_error_path_with_source(
+            &path,
+            "directory handle lacks enumeration access",
+            Some(std::io::Error::from_raw_os_error(5)),
+        );
+
+        match error {
+            CoreError::SecureTargetOpenFailed { source, .. } => {
+                assert_eq!(source.raw_os_error(), Some(5));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
