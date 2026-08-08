@@ -485,6 +485,31 @@ mod tests {
     }
 
     #[test]
+    fn trash_capability_is_unavailable_without_mutation() {
+        let fixture = Fixture::new("unsupported-trash");
+        let target_path = fixture.root.join("target");
+        fs::create_dir(&target_path).unwrap();
+        fs::write(target_path.join("child.txt"), b"data").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(file_identity(&target_path));
+        let secure = open_secure_target(&fixture.root, &target).unwrap();
+
+        assert_eq!(
+            secure.capabilities(),
+            super::super::CleanupCapabilities {
+                permanent: true,
+                trash: false,
+            }
+        );
+        assert!(matches!(
+            secure.move_to_trash(),
+            Err(CoreError::SecureTrashUnavailable)
+        ));
+        assert!(target_path.is_dir());
+        assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"data");
+    }
+
+    #[test]
     fn secure_open_rejects_identity_mismatch_and_replacement() {
         let fixture = Fixture::new("identity");
         let original = fixture.root.join("target");

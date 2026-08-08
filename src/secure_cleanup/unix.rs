@@ -365,6 +365,26 @@ mod tests {
     }
 
     #[test]
+    fn trash_capability_is_unavailable_without_mutation() {
+        let fixture = Fixture::new("unsupported-trash");
+        let target_path = fixture.root.join("target");
+        fs::create_dir(&target_path).expect("target should exist");
+        fs::write(target_path.join("child"), b"data").expect("child should exist");
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(Some(file_identity(&target_path)));
+        let secure_target =
+            open_secure_target(&fixture.root, &target).expect("identity-bound target should open");
+
+        assert!(!secure_target.capabilities().trash);
+        assert!(matches!(
+            secure_target.move_to_trash(),
+            Err(CoreError::SecureTrashUnavailable)
+        ));
+        assert!(target_path.is_dir());
+        assert_eq!(fs::read(target_path.join("child")).unwrap(), b"data");
+    }
+
+    #[test]
     fn validates_nested_children_relative_to_verified_directory_fd() {
         let fixture = Fixture::new("recursive-validation");
         let target_path = fixture.root.join("target");

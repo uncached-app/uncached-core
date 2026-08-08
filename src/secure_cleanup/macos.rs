@@ -291,6 +291,26 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn macos_trash_capability_is_unavailable_without_mutation() {
+        let root = fixture("unsupported-trash");
+        let path = root.join("target");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("child"), b"data").unwrap();
+        let target = ScanTarget::new(path.clone(), Category::NodeModules, 0)
+            .with_identity(Some(file_identity(&path)));
+        let secure = open_secure_target(&root, &target).unwrap();
+
+        assert!(!secure.capabilities().trash);
+        assert!(matches!(
+            secure.move_to_trash(),
+            Err(CoreError::SecureTrashUnavailable)
+        ));
+        assert!(path.is_dir());
+        assert_eq!(fs::read(path.join("child")).unwrap(), b"data");
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn fixture(name: &str) -> std::path::PathBuf {
         let root =
             std::env::temp_dir().join(format!("uncached-core-macos-{name}-{}", std::process::id()));

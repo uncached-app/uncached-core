@@ -433,7 +433,9 @@ mod tests {
             matches!(result, Err(CoreError::SecureTrashUnavailable)),
             "unexpected result: {result:?}"
         );
+        assert!(target_path.is_dir());
         assert!(target_path.join("child.txt").exists());
+        assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
         let _ = fs::remove_dir_all(root);
     }
 
