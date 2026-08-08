@@ -7,6 +7,8 @@ use std::path::Path;
 mod macos;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
 pub(crate) const NON_MACOS_UNIX_FD_BACKEND_SUPPORTED: bool =
     cfg!(any(target_os = "linux", target_os = "android"));
@@ -23,6 +25,8 @@ enum BackendTarget {
     Unix(unix::UnixTarget),
     #[cfg(target_os = "macos")]
     Macos(macos::MacosTarget),
+    #[cfg(windows)]
+    Windows(windows::WindowsTarget),
     Unsupported,
 }
 
@@ -37,6 +41,8 @@ impl SecureTarget {
             BackendTarget::Unix(target) => target.capabilities(),
             #[cfg(target_os = "macos")]
             BackendTarget::Macos(target) => target.capabilities(),
+            #[cfg(windows)]
+            BackendTarget::Windows(target) => target.capabilities(),
             BackendTarget::Unsupported => CleanupCapabilities {
                 permanent: false,
                 trash: false,
@@ -50,6 +56,8 @@ impl SecureTarget {
             BackendTarget::Unix(target) => target.delete_permanently(),
             #[cfg(target_os = "macos")]
             BackendTarget::Macos(target) => target.delete_permanently(),
+            #[cfg(windows)]
+            BackendTarget::Windows(target) => target.delete_permanently(),
             BackendTarget::Unsupported => Err(CoreError::SecureOperationUnsupported {
                 operation: "permanent cleanup".to_owned(),
             }),
@@ -62,6 +70,8 @@ impl SecureTarget {
             BackendTarget::Unix(target) => target.move_to_trash(),
             #[cfg(target_os = "macos")]
             BackendTarget::Macos(target) => target.move_to_trash(),
+            #[cfg(windows)]
+            BackendTarget::Windows(target) => target.move_to_trash(),
             BackendTarget::Unsupported => Err(CoreError::SecureTrashUnavailable),
         }
     }
@@ -92,7 +102,19 @@ pub(crate) fn open_secure_target(
         });
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        Ok(SecureTarget {
+            backend: BackendTarget::Windows(windows::open_secure_target(root, target)?),
+        })
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        windows
+    )))]
     {
         let _ = root;
         Ok(SecureTarget {
@@ -154,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn secure_target_is_consumed_by_operation() {
         let secure_target = open_secure_target(
             PathBuf::from("root").as_path(),
