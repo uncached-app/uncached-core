@@ -175,14 +175,28 @@ pub struct ScanTargetDto {
 }
 
 impl ScanTargetDto {
-    /// Converts a Core target after its sizing lifecycle has settled.
-    pub fn from_settled(target: &ScanTarget) -> Self {
+    /// Converts an explicitly settled target without losing sizing errors.
+    pub fn from_settled(target: SettledScanTarget<'_>) -> Self {
         Self {
-            path: target.path.to_string_lossy().into_owned(),
-            category: target.category.clone(),
-            size_bytes: target.size_bytes,
+            path: target.target.path.to_string_lossy().into_owned(),
+            category: target.target.category.clone(),
+            size_bytes: target.target.size_bytes,
             size_pending: false,
-            size_has_errors: false,
+            size_has_errors: target.size_has_errors,
+        }
+    }
+}
+
+pub struct SettledScanTarget<'a> {
+    target: &'a ScanTarget,
+    size_has_errors: bool,
+}
+
+impl<'a> SettledScanTarget<'a> {
+    pub fn new(target: &'a ScanTarget, size_has_errors: bool) -> Self {
+        Self {
+            target,
+            size_has_errors,
         }
     }
 }
@@ -212,6 +226,13 @@ pub struct ScanFinishedDto {
     pub total_targets: u64,
     pub total_bytes_found: u64,
     pub duration_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanFailedDto {
+    pub scan_id: String,
+    pub error: CoreErrorInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -66,10 +66,11 @@ All fields below are serialized with the shown camelCase names.
 This is Core's domain transport DTO. It does not describe every field in the
 Desktop event payload.
 
-`ScanTargetDto::from_settled` is restricted to targets whose sizing lifecycle has
-settled. Its `sizePending` and `sizeHasErrors` values are therefore both false.
-Desktop scan events use their own DTO when they need to preserve live sizing
-state.
+`ScanTargetDto::from_settled` accepts only an explicit `SettledScanTarget` wrapper,
+so pending targets cannot be passed accidentally. The wrapper carries the final
+`sizeHasErrors` value; conversion emits `sizePending: false` and preserves that
+error flag. Desktop scan events use their own DTO when they need to preserve live
+sizing state.
 
 ### `TargetSizedDto`
 
@@ -89,6 +90,18 @@ state.
 ```json
 { "scanId": "scan-1", "totalTargets": 2, "totalBytesFound": 42, "durationMs": 7 }
 ```
+
+### `ScanFailedDto`
+
+```json
+{
+  "scanId": "scan-1",
+  "error": { "code": "io", "message": "I/O error", "path": null, "operation": null }
+}
+```
+
+`scan:failed` is a successful v1 envelope containing this data DTO. The nested
+`scanId` correlates failure with its scan; the nested error remains sanitized.
 
 ### `CleanupResultDto`
 
@@ -157,13 +170,14 @@ clean:finished
 clean:failed
 ```
 
-`scan:finished` carries `ScanFinishedDto`. Core's `TargetFoundDto` is the
+`scan:finished` carries `ScanFinishedDto`. `scan:failed` carries `ScanFailedDto`
+inside `data`, not the envelope-level failure field. Core's `TargetFoundDto` is the
 domain shape for `scan:target_found`; Desktop wraps that shape in its
 Desktop-specific target-found DTO, adding `id`, `name`, `formattedSize`, and
 nullable `lastModified`. `scan:target_sized` carries `TargetSizedDto`. Core
 `CleanupResultDto` is the four-field command/domain result. Desktop
 `clean:finished` uses a separate event DTO when it intentionally omits
-`targetPath`. Failure events carry an error envelope with null data.
+`targetPath`. Cleanup failure events carry an error envelope with null data.
 `clean:finished` is the shipped success name; `clean:success` is not part of
 v1.
 

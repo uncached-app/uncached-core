@@ -1,9 +1,10 @@
 use serde_json::json;
+use std::path::PathBuf;
 use uncached_core::contract::v1::{
-    ApiEnvelope, CleanupCapabilities, CleanupResultDto, Platform, ScanFinishedDto, ScanTargetDto,
-    TargetFoundDto, TargetSizedDto,
+    ApiEnvelope, CleanupCapabilities, CleanupResultDto, Platform, ScanFailedDto, ScanFinishedDto,
+    ScanTargetDto, SettledScanTarget, TargetFoundDto, TargetSizedDto,
 };
-use uncached_core::{Category, CoreError, CoreErrorCode};
+use uncached_core::{Category, CoreError, CoreErrorCode, ScanTarget};
 
 #[test]
 fn scan_target_envelope_has_stable_v1_shape() {
@@ -23,6 +24,36 @@ fn scan_target_envelope_has_stable_v1_shape() {
     assert_eq!(value["platform"], "windows");
     assert_eq!(value["data"]["sizeBytes"], 123);
     assert!(value["error"].is_null());
+}
+
+#[test]
+fn settled_target_conversion_preserves_size_errors() {
+    let target = ScanTarget::new(PathBuf::from("target"), Category::NodeModules, 42);
+    let dto = ScanTargetDto::from_settled(SettledScanTarget::new(&target, true));
+
+    assert_eq!(dto.size_bytes, 42);
+    assert!(!dto.size_pending);
+    assert!(dto.size_has_errors);
+}
+
+#[test]
+fn scan_failed_dto_correlates_scan_and_sanitized_error() {
+    let value = serde_json::to_value(ApiEnvelope::success(
+        Platform::Windows,
+        ScanFailedDto {
+            scan_id: "scan-2".into(),
+            error: CoreError::TargetIdentityChanged {
+                path: PathBuf::from("target"),
+            }
+            .public_info(),
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(value["data"]["scanId"], "scan-2");
+    assert_eq!(value["data"]["error"]["code"], "target_identity_changed");
+    assert!(value["error"].is_null());
+    assert!(!value.to_string().contains("FileIdentity"));
 }
 
 #[test]
