@@ -2,6 +2,10 @@
 
 This is the canonical serialized contract exposed by `uncached-core::contract::v1`. It covers envelopes, public errors, capabilities, and transport DTOs. Desktop event names and command behavior are documented in `uncached-desktop/docs/IPC.md`.
 
+Desktop commands that use this public boundary return the same v1 envelope as
+events. A command failure has `data: null` and sanitized `error` information;
+native Rust error strings do not cross IPC.
+
 ## Envelope
 
 Every serialized envelope has exactly four keys and uses camelCase:
@@ -156,10 +160,12 @@ clean:failed
 `scan:finished` carries `ScanFinishedDto`. Core's `TargetFoundDto` is the
 domain shape for `scan:target_found`; Desktop wraps that shape in its
 Desktop-specific target-found DTO, adding `id`, `name`, `formattedSize`, and
-nullable `lastModified`. `scan:target_sized` carries `TargetSizedDto`. Cleanup
-success carries `CleanupResultDto`. Failure events carry an error envelope with
-null data. `clean:finished` is the shipped success name; `clean:success` is not
-part of v1.
+nullable `lastModified`. `scan:target_sized` carries `TargetSizedDto`. Core
+`CleanupResultDto` is the four-field command/domain result. Desktop
+`clean:finished` uses a separate event DTO when it intentionally omits
+`targetPath`. Failure events carry an error envelope with null data.
+`clean:finished` is the shipped success name; `clean:success` is not part of
+v1.
 
 ## Version and migration policy
 
