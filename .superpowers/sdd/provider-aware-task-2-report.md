@@ -24,3 +24,21 @@ Implemented Task 2 from `docs/superpowers/plans/2026-08-07-provider-aware-scanni
 - `cargo fmt --all`
 - `cargo test`
 - `cargo clippy --all-targets --all-features -- -D warnings`
+
+## Reviewer Fix
+
+- Captured `TraversalEntry.identity` with each candidate during traversal.
+- `ScanTarget` now uses captured identity after sizing; no filesystem identity
+  lookup occurs after the sizing callback.
+- The multi-provider test compares target identities with identities captured
+  from traversal. The current public API has no identity injection seam, so a
+  deterministic filesystem-swap test is not possible without expanding the
+  API. On platforms without file identity support, both values are correctly
+  represented as `None`.
+
+### Fix Verification
+
+- `cargo test --test node_modules scans_all_configured_provider_categories -- --exact`: 1 passed
+- `cargo fmt --all`: passed
+- `cargo test`: 27 passed, 0 failed
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed

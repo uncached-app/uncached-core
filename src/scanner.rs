@@ -120,7 +120,7 @@ where
     let mut candidates = Vec::new();
     let outcome = traverse_workspace(&root, providers, cancelled, |entry| {
         if let Some(category) = entry.category.clone() {
-            candidates.push((entry.path.clone(), category));
+            candidates.push((entry.path.clone(), category, entry.identity));
             TraversalControl::Prune
         } else {
             TraversalControl::Continue
@@ -132,7 +132,7 @@ where
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut targets = Vec::with_capacity(candidates.len());
-    for (path, category) in candidates {
+    for (path, category, identity) in candidates {
         if cancelled.load(Ordering::Acquire) {
             return Ok(ScanOutcome::Cancelled);
         }
@@ -140,7 +140,6 @@ where
         if cancelled.load(Ordering::Acquire) {
             return Ok(ScanOutcome::Cancelled);
         }
-        let identity = file_identity(&path);
         targets.push(ScanTarget::new(path, category, size_bytes).with_identity(identity));
     }
     let total_bytes = targets.iter().map(|target| target.size_bytes).sum();
