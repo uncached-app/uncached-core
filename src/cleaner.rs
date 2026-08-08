@@ -21,7 +21,7 @@ pub fn validate_clean_target(
     providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<PathBuf> {
-    let canonical = validate_clean_policy(root, providers, target)?;
+    let policy = validate_clean_policy(root, providers, target)?;
     let expected = target
         .identity
         .ok_or_else(|| CoreError::InvalidTarget("target filesystem identity unavailable".into()))?;
@@ -32,14 +32,19 @@ pub fn validate_clean_target(
             "target filesystem identity changed".into(),
         ));
     }
-    Ok(canonical)
+    Ok(policy.target)
+}
+
+struct CleanPolicy {
+    root: PathBuf,
+    target: PathBuf,
 }
 
 fn validate_clean_policy(
     root: &Path,
     providers: &ProviderSet,
     target: &ScanTarget,
-) -> CoreResult<PathBuf> {
+) -> CoreResult<CleanPolicy> {
     let root = canonical_workspace(root)?;
     let scanner = providers
         .scanner_for(target.category.clone())
@@ -76,7 +81,10 @@ fn validate_clean_policy(
             "target is outside safe workspace".into(),
         ));
     }
-    Ok(canonical)
+    Ok(CleanPolicy {
+        root,
+        target: canonical,
+    })
 }
 
 pub fn clean_to_trash(
@@ -84,8 +92,12 @@ pub fn clean_to_trash(
     providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<CleanReport> {
-    validate_clean_policy(root, providers, target)?;
-    let secure_target = crate::secure_cleanup::open_secure_target(root, providers, target)?;
+    let policy = validate_clean_policy(root, providers, target)?;
+    let secure_target = crate::secure_cleanup::open_secure_target(
+        &policy.root,
+        providers,
+        &canonical_target(target, &policy),
+    )?;
     #[cfg(all(test, any(unix, windows)))]
     run_secure_target_hook();
     secure_target.move_to_trash().map(|()| CleanReport {
@@ -99,8 +111,12 @@ pub fn clean_permanently(
     providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<CleanReport> {
-    validate_clean_policy(root, providers, target)?;
-    let secure_target = crate::secure_cleanup::open_secure_target(root, providers, target)?;
+    let policy = validate_clean_policy(root, providers, target)?;
+    let secure_target = crate::secure_cleanup::open_secure_target(
+        &policy.root,
+        providers,
+        &canonical_target(target, &policy),
+    )?;
     #[cfg(all(test, any(unix, windows)))]
     run_secure_target_hook();
     secure_target.delete_permanently()?;
@@ -108,6 +124,12 @@ pub fn clean_permanently(
         freed_bytes: 0,
         size_has_errors: true,
     })
+}
+
+fn canonical_target(target: &ScanTarget, policy: &CleanPolicy) -> ScanTarget {
+    let mut canonical = target.clone();
+    canonical.path = policy.target.clone();
+    canonical
 }
 
 #[cfg(all(test, any(unix, windows)))]
@@ -231,7 +253,7 @@ mod tests {
         let replacement = target_path.clone();
         let original = project.join("node_modules-original");
 
-        let hook_replacement = replacement.clone();
+        let hook_replacement = fs::canonicalize(&replacement).unwrap();
         let hook_original = original.clone();
         install_secure_target_hook(move || {
             #[cfg(unix)]
@@ -313,6 +335,58 @@ mod tests {
             "unexpected result: {result:?}"
         );
         assert!(target_path.join("child.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_permanent_cleanup_uses_canonical_workspace_root() {
+        let root = fixture();
+        let project = root.join("project");
+        let target_path = project.join("node_modules");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(target_path.join("child.txt"), b"content").unwrap();
+        fs::write(project.join("package.json"), b"{}").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 7)
+            .with_identity(file_identity(&target_path));
+
+        let result = super::clean_permanently(
+            &root.join("project").join(".."),
+            &ProviderSet::free(),
+            &target,
+        );
+
+        #[cfg(windows)]
+        {
+            result.unwrap();
+            assert!(!target_path.exists());
+        }
+        #[cfg(not(windows))]
+        assert!(matches!(
+            result,
+            Err(CoreError::SecureOperationUnsupported { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_trash_cleanup_uses_canonical_workspace_root() {
+        let root = fixture();
+        let project = root.join("project");
+        let target_path = project.join("node_modules");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(target_path.join("child.txt"), b"content").unwrap();
+        fs::write(project.join("package.json"), b"{}").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 7)
+            .with_identity(file_identity(&target_path));
+
+        let result = super::clean_to_trash(
+            &root.join("project").join(".."),
+            &ProviderSet::free(),
+            &target,
+        );
+
+        assert!(matches!(result, Err(CoreError::SecureTrashUnavailable)));
+        assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
         let _ = fs::remove_dir_all(root);
     }
 

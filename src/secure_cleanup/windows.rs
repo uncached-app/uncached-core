@@ -559,6 +559,34 @@ mod tests {
     }
 
     #[test]
+    fn replacement_created_after_open_handles_are_released_survives_cleanup() {
+        let fixture = Fixture::new("replacement-after-release");
+        let target_path = fixture.root.join("target");
+        let archived_path = fixture.root.join("archived");
+        fs::create_dir(&target_path).unwrap();
+        fs::write(target_path.join("original.txt"), b"original-content").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(file_identity(&target_path));
+        let secure = open_secure_target(&fixture.root, &target).unwrap();
+
+        let replacement_attempt = fs::rename(&target_path, &archived_path).unwrap_err();
+        assert_eq!(replacement_attempt.raw_os_error(), Some(5));
+        assert!(!archived_path.exists());
+
+        secure.delete_permanently().unwrap();
+        assert!(!target_path.exists());
+
+        fs::create_dir(&target_path).unwrap();
+        fs::write(target_path.join("replacement.txt"), b"replacement-content").unwrap();
+        assert_eq!(
+            fs::read(target_path.join("replacement.txt")).unwrap(),
+            b"replacement-content"
+        );
+        assert!(!target_path.join("original.txt").exists());
+        assert!(!archived_path.exists());
+    }
+
+    #[test]
     fn unsupported_capability_does_not_mutate_filesystem() {
         let secure = super::super::SecureTarget {
             backend: super::super::BackendTarget::Unsupported,
