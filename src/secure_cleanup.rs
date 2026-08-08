@@ -19,6 +19,44 @@ pub struct CleanupCapabilities {
     pub trash: bool,
 }
 
+pub(crate) fn cleanup_capabilities() -> crate::contract::v1::CleanupCapabilities {
+    let capabilities = backend_capabilities();
+    crate::contract::v1::CleanupCapabilities {
+        permanent: capabilities.permanent,
+        trash: capabilities.trash,
+        secure_identity: cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            windows
+        )),
+    }
+}
+
+fn backend_capabilities() -> CleanupCapabilities {
+    #[cfg(windows)]
+    {
+        return CleanupCapabilities {
+            permanent: true,
+            trash: false,
+        };
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    {
+        return CleanupCapabilities {
+            permanent: false,
+            trash: false,
+        };
+    }
+
+    #[allow(unreachable_code)]
+    CleanupCapabilities {
+        permanent: false,
+        trash: false,
+    }
+}
+
 #[derive(Debug)]
 enum BackendTarget {
     #[cfg(any(target_os = "linux", target_os = "android"))]

@@ -1,4 +1,5 @@
 pub mod cleaner;
+pub mod contract;
 pub mod error;
 pub mod filesystem;
 pub mod model;
@@ -19,3 +20,7 @@ pub use scanner::{
     traverse_workspace, CargoTargetScanner, GradleScanner, NextCacheScanner, NodeModulesScanner,
     ProviderSet, PyCacheScanner, Scanner, TraversalControl, TraversalEntry, TurboCacheScanner,
 };
+
+pub fn cleanup_capabilities() -> contract::v1::CleanupCapabilities {
+    secure_cleanup::cleanup_capabilities()
+}

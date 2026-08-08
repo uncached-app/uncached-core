@@ -1,0 +1,169 @@
+use crate::error::CoreErrorInfo;
+use crate::model::{Category, CleanReport, ScanTarget};
+use serde::{Deserialize, Serialize};
+
+impl<'de> Deserialize<'de> for CoreErrorInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ErrorInfo {
+            code: crate::error::CoreErrorCode,
+            message: String,
+            path: Option<String>,
+            operation: Option<String>,
+        }
+
+        let value = ErrorInfo::deserialize(deserializer)?;
+        Ok(Self {
+            code: value.code,
+            message: value.message,
+            path: value.path,
+            operation: value.operation,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for crate::error::CoreErrorCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "invalid_workspace" => Ok(Self::InvalidWorkspace),
+            "invalid_target" => Ok(Self::InvalidTarget),
+            "io" => Ok(Self::Io),
+            "trash" => Ok(Self::Trash),
+            "recycle_bin_too_large" => Ok(Self::RecycleBinTooLarge),
+            "target_identity_unavailable" => Ok(Self::TargetIdentityUnavailable),
+            "target_identity_changed" => Ok(Self::TargetIdentityChanged),
+            "target_reparse_point" => Ok(Self::TargetReparsePoint),
+            "secure_operation_unsupported" => Ok(Self::SecureOperationUnsupported),
+            "secure_target_open_failed" => Ok(Self::SecureTargetOpenFailed),
+            "secure_enumeration_failed" => Ok(Self::SecureEnumerationFailed),
+            "secure_handle_query_failed" => Ok(Self::SecureHandleQueryFailed),
+            "secure_deletion_failed" => Ok(Self::SecureDeletionFailed),
+            "secure_trash_unavailable" => Ok(Self::SecureTrashUnavailable),
+            value => Err(serde::de::Error::custom(format!(
+                "unknown error code: {value}"
+            ))),
+        }
+    }
+}
+
+pub const API_VERSION: &str = "v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Windows,
+    Linux,
+    Macos,
+    Android,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiEnvelope<T> {
+    pub api_version: String,
+    pub platform: Platform,
+    pub data: Option<T>,
+    pub error: Option<CoreErrorInfo>,
+}
+
+impl<T> ApiEnvelope<T> {
+    pub fn success(platform: Platform, data: T) -> Self {
+        Self {
+            api_version: API_VERSION.to_owned(),
+            platform,
+            data: Some(data),
+            error: None,
+        }
+    }
+
+    pub fn failure(platform: Platform, error: CoreErrorInfo) -> Self {
+        Self {
+            api_version: API_VERSION.to_owned(),
+            platform,
+            data: None,
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupCapabilities {
+    pub permanent: bool,
+    pub trash: bool,
+    pub secure_identity: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanTargetDto {
+    pub path: String,
+    pub category: Category,
+    pub size_bytes: u64,
+    pub size_pending: bool,
+    pub size_has_errors: bool,
+}
+
+impl From<&ScanTarget> for ScanTargetDto {
+    fn from(target: &ScanTarget) -> Self {
+        Self {
+            path: target.path.to_string_lossy().into_owned(),
+            category: target.category.clone(),
+            size_bytes: target.size_bytes,
+            size_pending: false,
+            size_has_errors: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetFoundDto {
+    pub scan_id: String,
+    pub target: ScanTargetDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetSizedDto {
+    pub scan_id: String,
+    pub target_id: String,
+    pub size_bytes: u64,
+    pub size_pending: bool,
+    pub size_has_errors: bool,
+    pub formatted_size: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanFinishedDto {
+    pub scan_id: String,
+    pub total_targets: u64,
+    pub total_bytes_found: u64,
+    pub duration_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupResultDto {
+    pub target_id: String,
+    pub freed_bytes: u64,
+    pub size_has_errors: bool,
+}
+
+impl From<(String, CleanReport)> for CleanupResultDto {
+    fn from((target_id, report): (String, CleanReport)) -> Self {
+        Self {
+            target_id,
+            freed_bytes: report.freed_bytes,
+            size_has_errors: report.size_has_errors,
+        }
+    }
+}
