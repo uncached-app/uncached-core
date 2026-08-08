@@ -89,6 +89,7 @@ pub fn file_identity(path: &Path) -> Option<FileIdentity> {
 fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
+    use std::path::Component;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -109,22 +110,33 @@ fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
         }
     }
 
-    if path.ancestors().any(|ancestor| {
-        if ancestor.as_os_str().is_empty() {
-            return false;
+    let mut component_path = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                component_path.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => component_path.push(component.as_os_str()),
+            Component::Normal(name) => {
+                component_path.push(name);
+                let Ok(metadata) = fs::symlink_metadata(&component_path) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() {
+                    return None;
+                }
+                let component_path_wide: Vec<u16> = component_path
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let attributes = unsafe { GetFileAttributesW(component_path_wide.as_ptr()) };
+                if attributes != u32::MAX && attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return None;
+                }
+            }
         }
-        if fs::symlink_metadata(ancestor).is_err() {
-            return true;
-        }
-        let ancestor: Vec<u16> = ancestor
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let attributes = unsafe { GetFileAttributesW(ancestor.as_ptr()) };
-        attributes == u32::MAX || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }) {
-        return None;
     }
 
     let path: Vec<u16> = path
@@ -251,18 +263,17 @@ mod windows_tests {
         let link = fixture_path("reparse-link");
         let target = link.join("target");
         fs::create_dir_all(real.join("target")).expect("real target should be created");
-        if !Command::new("cmd")
+        let junction_status = Command::new("cmd")
             .arg("/C")
             .arg("mklink")
             .arg("/J")
             .arg(&link)
             .arg(&real)
             .status()
-            .expect("junction command should start")
-            .success()
-        {
+            .expect("junction command should start");
+        if !junction_status.success() {
             fs::remove_dir_all(real).expect("real fixture should be removed");
-            return;
+            panic!("junction creation unsupported: mklink /J exited with {junction_status}");
         }
 
         assert_eq!(file_identity(&target), None);
