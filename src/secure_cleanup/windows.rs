@@ -176,16 +176,54 @@ fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
     };
     // FILE_LIST_DIRECTORY is required for directory enumeration but is not a
     // valid desired access for every regular-file provider.
-    let mut handle = open(DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY);
-    if handle == INVALID_HANDLE_VALUE {
-        handle = open(DELETE | FILE_READ_ATTRIBUTES);
+    let handle = open(DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY);
+    if handle != INVALID_HANDLE_VALUE {
+        return open_entry_with_handle(handle, path, display, true);
     }
+    let handle = open(DELETE | FILE_READ_ATTRIBUTES);
+    if handle != INVALID_HANDLE_VALUE {
+        return open_entry_with_handle(handle, path, display, false);
+    }
+    Err(CoreError::SecureTargetOpenFailed {
+        path: display.to_path_buf(),
+        source: std::io::Error::last_os_error(),
+    })
+}
+
+fn open_entry_with_access(
+    path: &Path,
+    display: &Path,
+    access: u32,
+    can_enumerate: bool,
+) -> CoreResult<Entry> {
+    let wide = wide_path(path);
+    // SAFETY: wide is NUL-terminated; all other arguments are fixed valid flags.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_POSIX_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
     if handle == INVALID_HANDLE_VALUE {
         return Err(CoreError::SecureTargetOpenFailed {
             path: display.to_path_buf(),
             source: std::io::Error::last_os_error(),
         });
     }
+    open_entry_with_handle(handle, path, display, can_enumerate)
+}
+
+fn open_entry_with_handle(
+    handle: HANDLE,
+    path: &Path,
+    display: &Path,
+    can_enumerate: bool,
+) -> CoreResult<Entry> {
     let handle = Handle(handle);
     let attributes = attributes_from_handle(handle.0, display)?;
     if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes.ReparseTag != 0 {
@@ -193,9 +231,16 @@ fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
             path: display.to_path_buf(),
         });
     }
+    let is_directory = attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if is_directory && !can_enumerate {
+        return Err(open_error_path(
+            display,
+            "directory handle lacks enumeration access",
+        ));
+    }
     let identity = identity_from_handle(handle.0, display)?;
     Ok(Entry {
-        is_directory: attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+        is_directory,
         identity,
         handle,
         path: path.to_path_buf(),
@@ -342,7 +387,9 @@ fn open_error_path(path: &Path, message: &str) -> CoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::{identity_matches, open_secure_target, os_string_from_wide};
+    use super::{
+        identity_matches, open_entry_with_access, open_secure_target, os_string_from_wide,
+    };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
     use crate::model::{Category, ScanTarget};
@@ -373,6 +420,24 @@ mod tests {
                 volume_serial: 7,
                 file_id: [4; 16],
             }
+        ));
+    }
+
+    #[test]
+    fn directory_opened_without_enumeration_access_is_rejected() {
+        let fixture = Fixture::new("directory-access");
+        let directory = fixture.root.join("target");
+        fs::create_dir(&directory).unwrap();
+
+        assert!(matches!(
+            open_entry_with_access(
+                &directory,
+                &directory,
+                windows_sys::Win32::Storage::FileSystem::DELETE
+                    | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
+                false,
+            ),
+            Err(CoreError::SecureTargetOpenFailed { .. })
         ));
     }
 
