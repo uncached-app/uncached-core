@@ -1,8 +1,6 @@
 use crate::error::{CoreError, CoreResult};
-use crate::filesystem::{
-    canonical_workspace, directory_size, file_identity, is_protected_directory,
-};
-use crate::model::{Category, ScanOutcome, ScanReport, ScanTarget, TraversalOutcome};
+use crate::filesystem::{canonical_workspace, file_identity, is_protected_directory};
+use crate::model::{Category, TraversalOutcome};
 use jwalk::{Parallelism, WalkDir};
 use std::collections::HashSet;
 use std::fs;
@@ -239,56 +237,6 @@ impl PrunedPaths {
     fn uses_index(&self) -> bool {
         self.index.is_some()
     }
-}
-
-pub fn scan_workspace(
-    root: &Path,
-    providers: &ProviderSet,
-    cancelled: &AtomicBool,
-) -> CoreResult<ScanOutcome> {
-    scan_workspace_with_sizing(root, providers, cancelled, directory_size)
-}
-
-pub fn scan_workspace_with_sizing<S>(
-    root: &Path,
-    providers: &ProviderSet,
-    cancelled: &AtomicBool,
-    mut size: S,
-) -> CoreResult<ScanOutcome>
-where
-    S: FnMut(&Path) -> CoreResult<u64>,
-{
-    let root = canonical_workspace(root)?;
-    let mut candidates = Vec::new();
-    let outcome = traverse_workspace(&root, providers, cancelled, |entry| {
-        if let Some(category) = entry.category.clone() {
-            candidates.push((entry.path.clone(), category, entry.identity));
-            TraversalControl::Prune
-        } else {
-            TraversalControl::Continue
-        }
-    })?;
-    if outcome == TraversalOutcome::Cancelled {
-        return Ok(ScanOutcome::Cancelled);
-    }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let mut targets = Vec::with_capacity(candidates.len());
-    for (path, category, identity) in candidates {
-        if cancelled.load(Ordering::Acquire) {
-            return Ok(ScanOutcome::Cancelled);
-        }
-        let size_bytes = size(&path)?;
-        if cancelled.load(Ordering::Acquire) {
-            return Ok(ScanOutcome::Cancelled);
-        }
-        targets.push(ScanTarget::new(path, category, size_bytes).with_identity(identity));
-    }
-    let total_bytes = targets.iter().map(|target| target.size_bytes).sum();
-    Ok(ScanOutcome::Completed(ScanReport {
-        targets,
-        total_bytes,
-    }))
 }
 
 pub fn traverse_workspace<F>(
