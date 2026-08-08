@@ -18,7 +18,7 @@ Implemented in commit `5375020`.
 
 - Wrote replacement regression before routing implementation.
 - Initial execution hit Windows linker/object locks; fresh isolated target compiled and ran verification.
-- Windows path replacement through an open retained directory returns `ERROR_ACCESS_DENIED`; Windows coverage uses public pre-open replacement rejection plus existing handle deletion tests. Unix/macOS post-open synchronization coverage remains deterministic and sleep-free.
+- Windows path replacement through an open retained directory returns `ERROR_ACCESS_DENIED`; post-open Windows coverage asserts that native refusal and then verifies secure deletion. Unix/macOS post-open synchronization coverage remains deterministic and sleep-free.
 
 ## Verification
 
@@ -29,7 +29,7 @@ Implemented in commit `5375020`.
 
 ## Concerns
 
-- Windows cannot rename retained target through its path while secure handles are open, so post-open replacement coverage is Unix/macOS-only.
+- Windows cannot rename retained target through its path while secure handles are open; the review regression documents this native behavior.
 - Secure sizing remains partial until backend-specific verified-handle sizing exists.
 
 ## Review Fixes
