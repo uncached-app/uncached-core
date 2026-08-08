@@ -120,9 +120,7 @@ fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
             Component::ParentDir => component_path.push(component.as_os_str()),
             Component::Normal(name) => {
                 component_path.push(name);
-                let Ok(metadata) = fs::symlink_metadata(&component_path) else {
-                    continue;
-                };
+                let metadata = fs::symlink_metadata(&component_path).ok()?;
                 if metadata.file_type().is_symlink() {
                     return None;
                 }
@@ -132,7 +130,7 @@ fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
                     .chain(std::iter::once(0))
                     .collect();
                 let attributes = unsafe { GetFileAttributesW(component_path_wide.as_ptr()) };
-                if attributes != u32::MAX && attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                if attributes == u32::MAX || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                     return None;
                 }
             }
