@@ -11,7 +11,7 @@ pub use cleaner::{
     clean_permanently, clean_permanently_with_delete_and_size, clean_to_trash,
     clean_to_trash_with_delete, clean_to_trash_with_delete_and_size, validate_clean_target,
 };
-pub use error::{CoreError, CoreResult};
+pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
 pub use model::{
     Category, CleanReport, FileIdentity, ScanOutcome, ScanReport, ScanTarget, TraversalOutcome,
 };
