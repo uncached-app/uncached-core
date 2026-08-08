@@ -268,36 +268,14 @@ fn validate_children(parent: RawFd, display: &Path) -> CoreResult<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 fn set_errno(value: libc::c_int) {
     // SAFETY: libc exposes thread-local errno storage for these targets.
     unsafe { *libc::__errno_location() = value };
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 fn errno() -> libc::c_int {
     // SAFETY: libc exposes thread-local errno storage for these targets.
     unsafe { *libc::__errno_location() }
-}
-
-#[cfg(target_os = "macos")]
-fn set_errno(value: libc::c_int) {
-    // SAFETY: libc exposes thread-local errno storage for macOS.
-    unsafe { *libc::__error() = value };
-}
-
-#[cfg(target_os = "macos")]
-fn errno() -> libc::c_int {
-    // SAFETY: libc exposes thread-local errno storage for macOS.
-    unsafe { *libc::__error() }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
-fn set_errno(_value: libc::c_int) {}
-
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
-fn errno() -> libc::c_int {
-    0
 }
 
 #[cfg(test)]

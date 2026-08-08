@@ -5,8 +5,11 @@ use std::path::Path;
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod unix;
+
+pub(crate) const NON_MACOS_UNIX_FD_BACKEND_SUPPORTED: bool =
+    cfg!(any(target_os = "linux", target_os = "android"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleanupCapabilities {
@@ -16,7 +19,7 @@ pub struct CleanupCapabilities {
 
 #[derive(Debug)]
 enum BackendTarget {
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     Unix(unix::UnixTarget),
     #[cfg(target_os = "macos")]
     Macos(macos::MacosTarget),
@@ -30,7 +33,7 @@ pub(crate) struct SecureTarget {
 impl SecureTarget {
     pub(crate) fn capabilities(&self) -> CleanupCapabilities {
         match &self.backend {
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             BackendTarget::Unix(target) => target.capabilities(),
             #[cfg(target_os = "macos")]
             BackendTarget::Macos(target) => target.capabilities(),
@@ -43,7 +46,7 @@ impl SecureTarget {
 
     pub(crate) fn delete_permanently(self) -> CoreResult<()> {
         match self.backend {
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             BackendTarget::Unix(target) => target.delete_permanently(),
             #[cfg(target_os = "macos")]
             BackendTarget::Macos(target) => target.delete_permanently(),
@@ -55,7 +58,7 @@ impl SecureTarget {
 
     pub(crate) fn move_to_trash(self) -> CoreResult<()> {
         match self.backend {
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             BackendTarget::Unix(target) => target.move_to_trash(),
             #[cfg(target_os = "macos")]
             BackendTarget::Macos(target) => target.move_to_trash(),
@@ -75,7 +78,7 @@ pub(crate) fn open_secure_target(
         });
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         return Ok(SecureTarget {
             backend: BackendTarget::Unix(unix::open_secure_target(root, target)?),
@@ -89,7 +92,7 @@ pub(crate) fn open_secure_target(
         });
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     {
         let _ = root;
         Ok(SecureTarget {
@@ -174,6 +177,33 @@ mod tests {
                 &target
             ),
             Err(CoreError::TargetIdentityUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn unix_fd_backend_support_matrix_is_explicit() {
+        assert_eq!(
+            super::NON_MACOS_UNIX_FD_BACKEND_SUPPORTED,
+            cfg!(any(target_os = "linux", target_os = "android"))
+        );
+    }
+
+    #[cfg(all(
+        unix,
+        not(target_os = "linux"),
+        not(target_os = "android"),
+        not(target_os = "macos")
+    ))]
+    #[test]
+    fn unsupported_unix_uses_typed_backend() {
+        assert!(!super::NON_MACOS_UNIX_FD_BACKEND_SUPPORTED);
+        let secure_target = SecureTarget {
+            backend: super::BackendTarget::Unsupported,
+        };
+
+        assert!(matches!(
+            secure_target.delete_permanently(),
+            Err(CoreError::SecureOperationUnsupported { .. })
         ));
     }
 }

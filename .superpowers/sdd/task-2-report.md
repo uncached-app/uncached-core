@@ -171,3 +171,42 @@ failed: target may not be installed (`can't find crate for core` / `std`)
 ```
 
 macOS runtime is unavailable on this Windows host; no macOS runtime pass is claimed.
+
+## Final Review Finding: Errno Support Matrix
+
+- Restricted the non-macOS Unix backend dispatch to Linux and Android, where the
+  `readdir` errno accessors are implemented with `__errno_location`.
+- Preserved macOS as a separate backend using Darwin `__error` accessors.
+- Other Unix targets now use the typed `Unsupported` backend instead of compiling
+  `unix.rs`; they cannot mistake a `readdir` failure for EOF.
+- Removed the generic no-op errno accessors. No unlinkat/path fallback or cleaner
+  integration was added; public cleaner integration remains deferred to Task 4.
+
+### Support Matrix
+
+| Target family | Backend | Errno accessor | Permanent | Trash |
+| --- | --- | --- | --- | --- |
+| Linux | non-macOS Unix FD validation | `__errno_location` | unsupported | unavailable |
+| Android | non-macOS Unix FD validation | `__errno_location` | unsupported | unavailable |
+| macOS | separate macOS FD validation | `__error` | unsupported | unavailable |
+| Other Unix | typed unsupported backend | not applicable | unsupported | unavailable |
+| Non-Unix | typed unsupported backend | not applicable | unsupported | unavailable |
+
+### Review Fix Verification
+
+Windows host:
+
+```text
+cargo test
+10 unit tests, 39 node_modules tests, 2 provider tests, 2 doc tests passed; 0 failed
+```
+
+Linux cross-target:
+
+```text
+cargo check --target x86_64-unknown-linux-gnu
+Finished `dev` profile
+```
+
+The Linux runtime test binary remains unavailable because the Windows host has no
+Linux linker. Formatting and diff checks were run after this review fix.
