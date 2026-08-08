@@ -128,3 +128,46 @@ Finished `dev` profile
 ```
 
 Unix runtime tests remain unavailable on this Windows host because the Linux linker `cc` is not installed. No Unix runtime pass is claimed.
+
+## Task 2 Architecture Correction
+
+- Changed Unix dispatch to `cfg(all(unix, not(target_os = "macos")))`.
+- Added separate `cfg(target_os = "macos")` dispatch and `src/secure_cleanup/macos.rs` backend.
+- macOS backend uses its own Darwin `openat`/`fstat`/`fdopendir`/`readdir` wrappers, rejects symlinked entries, validates recursively, reports `SecureEnumerationFailed`, and exposes no permanent or Trash capability.
+- Non-macOS Unix secure opening now invokes FD-relative validation before returning `UnixTarget`; permanent deletion remains unsupported and non-mutating.
+- Added Unix regression coverage for symlink children rejected during secure open and macOS-gated identity, symlink, and unsupported-operation tests.
+
+## Final Verification
+
+Windows host:
+
+```text
+cargo test
+9 unit tests passed, 39 node_modules tests passed, 2 provider tests passed, 0 failed
+
+cargo fmt --all -- --check
+passed
+```
+
+Linux cross-target:
+
+```text
+cargo check --target x86_64-unknown-linux-gnu
+Finished `dev` profile
+```
+
+TDD regression execution:
+
+```text
+cargo test --target x86_64-unknown-linux-gnu secure_open_rejects_symlink_child_during_validation -- --nocapture
+failed before test execution: linker `cc` not found
+```
+
+macOS:
+
+```text
+cargo check --target x86_64-apple-darwin
+failed: target may not be installed (`can't find crate for core` / `std`)
+```
+
+macOS runtime is unavailable on this Windows host; no macOS runtime pass is claimed.

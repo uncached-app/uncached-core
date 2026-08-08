@@ -3,7 +3,9 @@ use crate::model::ScanTarget;
 use crate::scanner::ProviderSet;
 use std::path::Path;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod unix;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,8 +16,10 @@ pub struct CleanupCapabilities {
 
 #[derive(Debug)]
 enum BackendTarget {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     Unix(unix::UnixTarget),
+    #[cfg(target_os = "macos")]
+    Macos(macos::MacosTarget),
     Unsupported,
 }
 
@@ -26,8 +30,10 @@ pub(crate) struct SecureTarget {
 impl SecureTarget {
     pub(crate) fn capabilities(&self) -> CleanupCapabilities {
         match &self.backend {
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             BackendTarget::Unix(target) => target.capabilities(),
+            #[cfg(target_os = "macos")]
+            BackendTarget::Macos(target) => target.capabilities(),
             BackendTarget::Unsupported => CleanupCapabilities {
                 permanent: false,
                 trash: false,
@@ -37,8 +43,10 @@ impl SecureTarget {
 
     pub(crate) fn delete_permanently(self) -> CoreResult<()> {
         match self.backend {
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             BackendTarget::Unix(target) => target.delete_permanently(),
+            #[cfg(target_os = "macos")]
+            BackendTarget::Macos(target) => target.delete_permanently(),
             BackendTarget::Unsupported => Err(CoreError::SecureOperationUnsupported {
                 operation: "permanent cleanup".to_owned(),
             }),
@@ -47,8 +55,10 @@ impl SecureTarget {
 
     pub(crate) fn move_to_trash(self) -> CoreResult<()> {
         match self.backend {
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             BackendTarget::Unix(target) => target.move_to_trash(),
+            #[cfg(target_os = "macos")]
+            BackendTarget::Macos(target) => target.move_to_trash(),
             BackendTarget::Unsupported => Err(CoreError::SecureTrashUnavailable),
         }
     }
@@ -65,10 +75,17 @@ pub(crate) fn open_secure_target(
         });
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         return Ok(SecureTarget {
             backend: BackendTarget::Unix(unix::open_secure_target(root, target)?),
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(SecureTarget {
+            backend: BackendTarget::Macos(macos::open_secure_target(root, target)?),
         });
     }
 

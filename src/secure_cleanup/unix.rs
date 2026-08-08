@@ -90,6 +90,8 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
         });
     }
 
+    validate_children(target_fd.as_raw_fd(), &target.path)?;
+
     Ok(UnixTarget {
         _workspace: workspace,
         _parent: parent,
@@ -290,9 +292,13 @@ fn errno() -> libc::c_int {
     unsafe { *libc::__error() }
 }
 
-#[cfg(test)]
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
-compile_error!("Unix secure cleanup requires a supported errno accessor");
+fn set_errno(_value: libc::c_int) {}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn errno() -> libc::c_int {
+    0
+}
 
 #[cfg(test)]
 mod tests {
@@ -402,6 +408,23 @@ mod tests {
             .expect("target should remain readable")
             .next()
             .is_some());
+    }
+
+    #[test]
+    fn secure_open_rejects_symlink_child_during_validation() {
+        let fixture = Fixture::new("child-symlink");
+        let target_path = fixture.root.join("target");
+        fs::create_dir(&target_path).expect("target should exist");
+        fs::create_dir(fixture.root.join("real")).expect("real directory should exist");
+        std::os::unix::fs::symlink("../real", target_path.join("link"))
+            .expect("child symlink should be created");
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(file_identity(&target_path));
+
+        assert!(matches!(
+            open_secure_target(&fixture.root, &target),
+            Err(CoreError::TargetReparsePoint { .. })
+        ));
     }
 
     struct Fixture {
