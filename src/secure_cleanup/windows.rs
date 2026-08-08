@@ -194,14 +194,22 @@ impl WindowsTarget {
             entries,
             _ancestors: ancestors,
         } = self;
-        let path = entries
+        // open_secure_target asserts this invariant: target entry is always first and the
+        // collection is never empty. An empty collection is an internal construction bug, not
+        // an unavailable Trash backend.
+        let target = entries
             .first()
-            .map(|entry| entry.path.clone())
-            .ok_or(CoreError::SecureTrashUnavailable)?;
-        // Shell operates by validated path. Release verification handles first so they do not
-        // cause IFileOperation to abort its Recycle Bin move.
+            .expect("WindowsTarget must contain its verified target entry");
+        let path = target.path.clone();
+        let expected_identity = target.identity;
+        // Shell operates by namespace path, so retained verification handles must be released
+        // before IFileOperation. Revalidate immediately after release. This closes the known
+        // handle-to-path gap, but cannot make the later Shell operation handle-atomic: the
+        // approved design accepts that residual namespace race. Any identity or reparse-point
+        // ambiguity detected here fails closed.
         drop(entries);
         drop(ancestors);
+        revalidate_shell_target(&path, expected_identity)?;
         let _apartment = ComApartment::initialize_sta()?;
         let wide = shell_wide_path(&path);
         let mut shell_item = std::ptr::null_mut();
@@ -269,6 +277,11 @@ impl WindowsTarget {
         if aborted != 0 {
             return Err(CoreError::SecureTrashAborted { path });
         }
+        // PerformOperations has no handle-atomic postcondition. If the validated namespace path
+        // still resolves, or cannot be classified unambiguously, fail closed rather than claim
+        // the original target reached the Recycle Bin. A replacement can still win the residual
+        // race between this check and Shell's operation; that limitation is intentional.
+        verify_shell_postcondition(&path, expected_identity)?;
         Ok(())
     }
 }
@@ -286,6 +299,39 @@ fn map_trash_error(path: &Path, operation: &str, result: HRESULT) -> CoreError {
         path: path.to_path_buf(),
         operation: operation.to_owned(),
         source: hresult_error(result),
+    }
+}
+
+fn revalidate_shell_target(path: &Path, expected: FileIdentity) -> CoreResult<()> {
+    let entry = open_entry(path, path)?;
+    if entry.identity != expected {
+        return Err(CoreError::TargetIdentityChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn verify_shell_postcondition(path: &Path, expected: FileIdentity) -> CoreResult<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(CoreError::SecureTrashPostconditionFailed {
+            path: path.to_path_buf(),
+        }),
+        Ok(_) => match open_entry(path, path) {
+            Ok(entry) if entry.identity != expected => Err(CoreError::TargetIdentityChanged {
+                path: path.to_path_buf(),
+            }),
+            Ok(_) => Err(CoreError::SecureTrashPostconditionFailed {
+                path: path.to_path_buf(),
+            }),
+            Err(CoreError::TargetReparsePoint { path }) => {
+                Err(CoreError::TargetReparsePoint { path })
+            }
+            Err(_) => Err(CoreError::SecureTrashPostconditionFailed {
+                path: path.to_path_buf(),
+            }),
+        },
     }
 }
 
@@ -335,6 +381,10 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
 
     let mut entries = Vec::new();
     collect_entries(target_entry, &mut entries)?;
+    assert!(
+        !entries.is_empty(),
+        "collect_entries must retain verified target entry"
+    );
     Ok(WindowsTarget {
         _ancestors: ancestors,
         entries,
@@ -693,12 +743,21 @@ fn wide_path(path: &Path) -> Vec<u16> {
 
 fn shell_wide_path(path: &Path) -> Vec<u16> {
     let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-    let path = if wide.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]) {
-        &wide[4..]
+    let extended_prefix = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    let unc_prefix = [b'U' as u16, b'N' as u16, b'C' as u16, b'\\' as u16];
+    let path = if wide.starts_with(&extended_prefix) {
+        if wide[4..].starts_with(&unc_prefix) {
+            let mut unc = vec![b'\\' as u16, b'\\' as u16];
+            unc.extend_from_slice(&wide[8..]);
+            unc
+        } else {
+            // Only extended drive paths may discard the four-character prefix directly.
+            wide[4..].to_vec()
+        }
     } else {
-        &wide
+        wide
     };
-    path.iter().copied().chain(std::iter::once(0)).collect()
+    path.into_iter().chain(std::iter::once(0)).collect()
 }
 
 fn os_string_from_wide(name: &[u16]) -> OsString {
@@ -732,9 +791,9 @@ fn open_error_path_with_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        identity_matches, map_disposition_error, open_entry_with_access,
+        identity_matches, map_disposition_error, map_trash_error, open_entry_with_access,
         open_error_path_with_source, open_secure_target, os_string_from_wide,
-        parse_directory_records,
+        parse_directory_records, shell_wide_path,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
@@ -752,6 +811,41 @@ mod tests {
             name,
             OsString::from_wide(&[b'f' as u16, 0xd800, b'x' as u16])
         );
+    }
+
+    #[test]
+    fn shell_path_strips_extended_drive_prefix() {
+        let wide = shell_wide_path(PathBuf::from(r"\\?\C:\target").as_path());
+
+        assert_eq!(
+            OsString::from_wide(&wide[..wide.len() - 1]),
+            OsString::from(r"C:\target")
+        );
+    }
+
+    #[test]
+    fn shell_path_converts_extended_unc_prefix() {
+        let wide = shell_wide_path(PathBuf::from(r"\\?\UNC\server\share\target").as_path());
+
+        assert_eq!(
+            OsString::from_wide(&wide[..wide.len() - 1]),
+            OsString::from(r"\\server\share\target")
+        );
+    }
+
+    #[test]
+    fn shell_hresult_mapping_preserves_operation_and_hresult() {
+        let path = PathBuf::from("target");
+        let hresult = -2_147_467_259;
+        let error = map_trash_error(&path, "PerformOperations", hresult);
+
+        assert!(matches!(
+            error,
+            CoreError::SecureTrashOperationFailed { ref path, ref operation, ref source }
+                if path == &PathBuf::from("target")
+                    && operation == "PerformOperations"
+                    && source.raw_os_error() == Some(hresult)
+        ));
     }
 
     #[test]
