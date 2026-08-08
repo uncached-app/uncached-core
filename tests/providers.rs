@@ -1,10 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use uncached_core::{traverse_workspace, Category, ProviderSet, TraversalControl};
 
+static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+
 fn fixture() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("uncached-core-providers-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "uncached-core-providers-{}-{}",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     root
@@ -104,5 +110,60 @@ fn all_scanners_require_expected_context_and_reject_bare_cargo_target() {
         1
     );
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn each_configured_provider_ignores_same_basename_decoy_contexts() {
+    let root = fixture();
+
+    fs::create_dir_all(root.join("node-valid/node_modules")).unwrap();
+    fs::write(root.join("node-valid/package.json"), b"{}").unwrap();
+    fs::create_dir_all(root.join("node-invalid/node_modules")).unwrap();
+
+    fs::create_dir_all(root.join("cargo-valid/target")).unwrap();
+    fs::write(root.join("cargo-valid/Cargo.toml"), b"[package]").unwrap();
+    fs::create_dir_all(root.join("cargo-invalid/target")).unwrap();
+
+    fs::create_dir_all(root.join("next-valid/.next")).unwrap();
+    fs::write(root.join("next-valid/package.json"), b"{}").unwrap();
+    fs::create_dir_all(root.join("next-invalid/.next")).unwrap();
+
+    fs::create_dir_all(root.join("turbo-valid/.turbo")).unwrap();
+    fs::write(root.join("turbo-valid/package.json"), b"{}").unwrap();
+    fs::create_dir_all(root.join("turbo-invalid/.turbo")).unwrap();
+
+    fs::create_dir_all(root.join("python-valid/__pycache__")).unwrap();
+    fs::create_dir_all(root.join("gradle-valid/.gradle")).unwrap();
+
+    fs::create_dir_all(root.join(".git/python-invalid/__pycache__")).unwrap();
+    fs::create_dir_all(root.join(".git/gradle-invalid/.gradle")).unwrap();
+
+    let mut found = Vec::new();
+    let cancelled = AtomicBool::new(false);
+    traverse_workspace(&root, &ProviderSet::all(), &cancelled, |entry| {
+        if entry.category.is_some() {
+            found.push((entry.path.clone(), entry.category.clone().unwrap()));
+            TraversalControl::Prune
+        } else {
+            TraversalControl::Continue
+        }
+    })
+    .unwrap();
+
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    let expected = [
+        ("cargo-valid/target", Category::CargoTarget),
+        ("gradle-valid/.gradle", Category::Gradle),
+        ("next-valid/.next", Category::NextJs),
+        ("node-valid/node_modules", Category::NodeModules),
+        ("python-valid/__pycache__", Category::PyCache),
+        ("turbo-valid/.turbo", Category::Turbo),
+    ]
+    .into_iter()
+    .map(|(path, category)| (fs::canonicalize(root.join(path)).unwrap(), category))
+    .collect::<Vec<_>>();
+
+    assert_eq!(found, expected);
     let _ = fs::remove_dir_all(root);
 }

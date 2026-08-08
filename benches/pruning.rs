@@ -1,7 +1,10 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use uncached_core::scanner::PrunedPaths;
+use uncached_core::{traverse_workspace, ProviderSet, TraversalControl};
 
 const ENTRY_COUNTS: &[usize] = &[1_000, 100_000, 1_000_000];
 const PRUNED_COUNTS: &[usize] = &[1, 32, 1_024];
@@ -98,5 +101,79 @@ fn pruning_lookup(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, pruning_lookup);
+fn candidate_fixture() -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "uncached-core-pruning-candidates-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+
+    for branch in 0..24 {
+        let mut path = root.join("irrelevant");
+        for level in 0..branch {
+            path = path.join(format!("level-{level}"));
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("ignored.txt"), b"irrelevant").unwrap();
+        }
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join(format!("file-{branch}.txt")), b"irrelevant").unwrap();
+    }
+
+    for artifact in 0..12 {
+        let path = root
+            .join(format!("project-{artifact}"))
+            .join("node_modules");
+        fs::create_dir_all(&path).unwrap();
+        for file in 0..256 {
+            fs::write(
+                path.join(format!("package-{file}.bin")),
+                b"terminal artifact",
+            )
+            .unwrap();
+        }
+        fs::write(path.parent().unwrap().join("package.json"), b"{}").unwrap();
+    }
+
+    for target in 0..4 {
+        let path = root
+            .join("valid")
+            .join(format!("project-{target}"))
+            .join("node_modules");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.parent().unwrap().join("package.json"), b"{}").unwrap();
+    }
+
+    root
+}
+
+fn callback_only_discovery(c: &mut Criterion) {
+    let root = candidate_fixture();
+    let mut group = c.benchmark_group("candidate_discovery");
+    group.bench_function("callback_only", |b| {
+        b.iter(|| {
+            let cancelled = AtomicBool::new(false);
+            let mut candidates = 0usize;
+            traverse_workspace(
+                black_box(&root),
+                &ProviderSet::free(),
+                &cancelled,
+                |entry| {
+                    if entry.category.is_some() {
+                        candidates += 1;
+                        TraversalControl::Prune
+                    } else {
+                        TraversalControl::Continue
+                    }
+                },
+            )
+            .unwrap();
+            black_box(candidates)
+        });
+    });
+    group.finish();
+    let _ = fs::remove_dir_all(root);
+}
+
+criterion_group!(benches, pruning_lookup, callback_only_discovery);
 criterion_main!(benches);
