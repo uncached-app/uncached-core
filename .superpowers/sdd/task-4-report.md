@@ -2,30 +2,32 @@
 
 ## Status
 
-Implemented and committed in `uncached-desktop`.
-
-Commit: `1dda14e` (`refactor(desktop): consume core providers and cleanup`)
+Implemented in commit `5375020`.
 
 ## Changes
 
-- Replaced six Desktop scanner adapter registrations with the six scanner types exported by `uncached-core`.
-- Removed Desktop `Scanner` trait, `get_default_scanners`, and six local scanner adapter files.
-- Removed Desktop `Cleaner`, trash/permanent cleaner policy, Windows cleaner helper, and cleaner module registration.
-- Routed Trash and Permanent cleanup through core using each registered target's `Arc<ProviderSet>` snapshot.
-- Moved cleanup canonicalization, provider validation, root/symlink safety, sizing, and deletion responsibility to core.
-- Preserved Desktop permanent confirmation, Trash settings gate, result DTO conversion, events, and Trash history behavior.
-- Strengthened provider coverage test to assert all six configured categories and preserved optional-provider settings tests.
-- Preserved registered target size-error state in returned cleanup DTOs.
+- Public permanent cleanup now uses policy validation, one `open_secure_target`, and consumed secure deletion.
+- Public Trash cleanup uses secure setup and typed `SecureTrashUnavailable`; no Trash support was added.
+- Removed production path-based deletion and path-based Trash calls from public entry points.
+- Preserved injected delete helpers for policy/error tests; production entry points do not call them.
+- Preserved `validate_clean_target` identity/error behavior while separating policy validation before secure open.
+- Returned existing partial-size shape (`freed_bytes: 0`, `size_has_errors: true`) because current secure backends lack secure sizing.
+- Added public cleanup regression coverage, typed Trash refusal coverage, and cross-platform provider expectations.
+
+## TDD
+
+- Wrote replacement regression before routing implementation.
+- Initial execution hit Windows linker/object locks; fresh isolated target compiled and ran verification.
+- Windows path replacement through an open retained directory returns `ERROR_ACCESS_DENIED`; Windows coverage uses public pre-open replacement rejection plus existing handle deletion tests. Unix/macOS post-open synchronization coverage remains deterministic and sleep-free.
 
 ## Verification
 
-- `cargo test --manifest-path src-tauri/Cargo.toml`: passed, 41 tests.
-- `cargo check --manifest-path src-tauri/Cargo.toml`: passed.
-- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`: passed.
-- `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`: blocked by pre-existing trailing blank line in untouched `src-tauri/src/commands/mod.rs`; edited files were formatted and have no diff-check errors.
-- Consumer search confirmed no remaining references to removed Desktop scanner or cleaner modules.
+- `cargo test --target-dir target-task4-final -j 1`: passed, 20 unit tests, 39 integration tests, 2 provider tests, doc tests.
+- `cargo test --target-dir target-task4-final -j 1 --test node_modules`: passed, 39 tests.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --target-dir target-task4-final --all-targets --all-features -- -D warnings`: passed.
 
 ## Concerns
 
-- Repository-wide formatting check remains non-zero because `src-tauri/src/commands/mod.rs` has an unrelated existing blank line. It was intentionally not changed.
-- Cargo emitted the existing Windows linker stdout warning during tests; no test or compiler failure resulted.
+- Windows cannot rename retained target through its path while secure handles are open, so post-open replacement coverage is Unix/macOS-only.
+- Secure sizing remains partial until backend-specific verified-handle sizing exists.
