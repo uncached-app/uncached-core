@@ -2,7 +2,13 @@
 
 ## Status
 
-Implemented Task 1 and review fixes on core main at HEAD `84b8f13`.
+Implemented Task 1 and review fixes on core main at final report HEAD `4d9a816`.
+
+## Commits
+
+- `da7da97` (`feat(core): add serializable error DTO`)
+- `84b8f13` (`fix(core): sanitize public error messages`)
+- `4d9a816` (`docs: update serializable error report`)
 
 ## Changes
 
@@ -44,7 +50,8 @@ cargo fmt --all         # completed successfully
 cargo fmt --all -- --check  # final formatting check
 ```
 
-The full core test run included 37 unit tests, 41 integration tests, and 2 doc tests.
+The full core test run included 37 unit tests, 41 `node_modules` integration tests,
+2 `providers` integration tests, and 0 doc tests.
 
 ## Review Fix
 
@@ -75,7 +82,7 @@ GREEN result: 7 passed, 0 failed.
 
 ```text
 cargo test error::tests       # 7 passed, 0 failed
-cargo test                    # 37 unit + 41 integration + 2 doc = 80 passed, 0 failed
+cargo test                    # 37 unit + 41 node_modules integration + 2 providers integration + 0 doc = 80 passed, 0 failed
 cargo fmt --all               # completed successfully
 cargo fmt --all -- --check    # completed successfully
 ```
