@@ -54,7 +54,7 @@ impl<'de> Deserialize<'de> for crate::error::CoreErrorCode {
 
 pub const API_VERSION: &str = "v1";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     Windows,
