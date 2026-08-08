@@ -38,7 +38,7 @@ fn backend_capabilities() -> CleanupCapabilities {
     {
         return CleanupCapabilities {
             permanent: true,
-            trash: false,
+            trash: true,
         };
     }
 

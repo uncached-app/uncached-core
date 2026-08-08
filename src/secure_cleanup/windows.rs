@@ -2,9 +2,11 @@ use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 use std::ffi::c_void;
 use std::ffi::OsString;
+use std::marker::PhantomData;
 use std::mem::{offset_of, size_of, MaybeUninit};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
+use windows_sys::core::{GUID, HRESULT};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
     INVALID_HANDLE_VALUE,
@@ -18,6 +20,116 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_POSIX_SEMANTICS, FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED,
+};
+use windows_sys::Win32::UI::Shell::{
+    FileOperation, SHCreateItemFromParsingName, FOF_ALLOWUNDO, FOF_NO_UI,
+};
+
+const IID_ISHELL_ITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+const IID_IFILE_OPERATION: GUID = GUID::from_u128(0x947aab5f_0a5c_4c13_b4d6_4bf7836fc9f8);
+
+#[repr(C)]
+struct IUnknownVtbl {
+    query_interface:
+        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+    add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
+    release: unsafe extern "system" fn(*mut c_void) -> u32,
+}
+
+#[repr(C)]
+struct IFileOperationVtbl {
+    base: IUnknownVtbl,
+    advise: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut u32) -> HRESULT,
+    unadvise: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT,
+    set_operation_flags: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT,
+    set_progress_message: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT,
+    set_progress_dialog: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+    set_properties: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+    set_owner_window: unsafe extern "system" fn(*mut c_void, isize) -> HRESULT,
+    apply_properties_to_item: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+    apply_properties_to_items: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+    rename_item:
+        unsafe extern "system" fn(*mut c_void, *mut c_void, *const u16, *mut c_void) -> HRESULT,
+    rename_items: unsafe extern "system" fn(*mut c_void, *mut c_void, *const u16) -> HRESULT,
+    move_item: unsafe extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+        *const u16,
+        *mut c_void,
+    ) -> HRESULT,
+    move_items: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) -> HRESULT,
+    copy_item: unsafe extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+        *const u16,
+        *mut c_void,
+    ) -> HRESULT,
+    copy_items: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) -> HRESULT,
+    delete_item: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) -> HRESULT,
+    delete_items: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+    new_item: unsafe extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        u32,
+        *const u16,
+        *const u16,
+        *mut c_void,
+    ) -> HRESULT,
+    perform_operations: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+    get_any_operations_aborted: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT,
+}
+
+#[derive(Debug)]
+struct ComPtr<T> {
+    ptr: *mut c_void,
+    _interface: PhantomData<T>,
+}
+
+impl<T> ComPtr<T> {
+    unsafe fn from_raw(ptr: *mut c_void) -> Self {
+        Self {
+            ptr,
+            _interface: PhantomData,
+        }
+    }
+}
+
+impl<T> Drop for ComPtr<T> {
+    fn drop(&mut self) {
+        // SAFETY: COM owns pointer and its vtable remains valid until Release.
+        unsafe {
+            let vtable = *(self.ptr as *mut *const IUnknownVtbl);
+            ((*vtable).release)(self.ptr);
+        }
+    }
+}
+
+struct ComApartment;
+
+impl ComApartment {
+    fn initialize_sta() -> CoreResult<Self> {
+        // SAFETY: This initializes COM only on current thread; guard uninitializes it on Drop.
+        let result = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        if result < 0 {
+            return Err(CoreError::SecureTrashInitializationFailed {
+                source: hresult_error(result),
+            });
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns successful COM initialization on current thread.
+        unsafe { CoUninitialize() };
+    }
+}
 
 #[derive(Debug)]
 struct Handle(HANDLE);
@@ -47,7 +159,7 @@ impl WindowsTarget {
     pub(super) fn capabilities(&self) -> super::CleanupCapabilities {
         super::CleanupCapabilities {
             permanent: true,
-            trash: false,
+            trash: true,
         }
     }
 
@@ -78,7 +190,102 @@ impl WindowsTarget {
     }
 
     pub(super) fn move_to_trash(self) -> CoreResult<()> {
-        Err(CoreError::SecureTrashUnavailable)
+        let WindowsTarget {
+            entries,
+            _ancestors: ancestors,
+        } = self;
+        let path = entries
+            .first()
+            .map(|entry| entry.path.clone())
+            .ok_or(CoreError::SecureTrashUnavailable)?;
+        // Shell operates by validated path. Release verification handles first so they do not
+        // cause IFileOperation to abort its Recycle Bin move.
+        drop(entries);
+        drop(ancestors);
+        let _apartment = ComApartment::initialize_sta()?;
+        let wide = shell_wide_path(&path);
+        let mut shell_item = std::ptr::null_mut();
+        // SAFETY: wide is NUL-terminated and output pointer is valid storage.
+        let result = unsafe {
+            SHCreateItemFromParsingName(
+                wide.as_ptr(),
+                std::ptr::null_mut(),
+                &IID_ISHELL_ITEM,
+                &mut shell_item,
+            )
+        };
+        if result < 0 {
+            return Err(map_trash_error(
+                &path,
+                "SHCreateItemFromParsingName",
+                result,
+            ));
+        }
+        // SAFETY: successful API call initialized a COM interface pointer.
+        let shell_item = unsafe { ComPtr::<IShellItemTag>::from_raw(shell_item) };
+
+        let mut file_operation = std::ptr::null_mut();
+        // SAFETY: CLSID/IID are valid and output pointer is valid storage.
+        let result = unsafe {
+            CoCreateInstance(
+                &FileOperation,
+                std::ptr::null_mut(),
+                CLSCTX_INPROC_SERVER,
+                &IID_IFILE_OPERATION,
+                &mut file_operation,
+            )
+        };
+        if result < 0 {
+            return Err(map_trash_error(&path, "CoCreateInstance", result));
+        }
+        // SAFETY: successful API call initialized a COM interface pointer.
+        let file_operation = unsafe { ComPtr::<IFileOperationTag>::from_raw(file_operation) };
+        let vtable = unsafe { *(file_operation.ptr as *mut *const IFileOperationVtbl) };
+        let flags = FOF_ALLOWUNDO | FOF_NO_UI;
+        // SAFETY: file_operation and vtable are valid COM objects; flags are documented ABI value.
+        let result = unsafe { ((*vtable).set_operation_flags)(file_operation.ptr, flags) };
+        if result < 0 {
+            return Err(map_trash_error(&path, "SetOperationFlags", result));
+        }
+        // SAFETY: shell_item is valid and progress sink is intentionally null.
+        let result = unsafe {
+            ((*vtable).delete_item)(file_operation.ptr, shell_item.ptr, std::ptr::null_mut())
+        };
+        if result < 0 {
+            return Err(map_trash_error(&path, "DeleteItem", result));
+        }
+        // SAFETY: queued operation belongs to valid file_operation object.
+        let result = unsafe { ((*vtable).perform_operations)(file_operation.ptr) };
+        if result < 0 {
+            return Err(map_trash_error(&path, "PerformOperations", result));
+        }
+        let mut aborted = 0;
+        // SAFETY: output pointer is valid and object remains alive.
+        let result =
+            unsafe { ((*vtable).get_any_operations_aborted)(file_operation.ptr, &mut aborted) };
+        if result < 0 {
+            return Err(map_trash_error(&path, "GetAnyOperationsAborted", result));
+        }
+        if aborted != 0 {
+            return Err(CoreError::SecureTrashAborted { path });
+        }
+        Ok(())
+    }
+}
+
+// windows-sys exposes these Shell COM interfaces through their ABI, not typed wrappers.
+enum IShellItemTag {}
+enum IFileOperationTag {}
+
+fn hresult_error(result: HRESULT) -> std::io::Error {
+    std::io::Error::from_raw_os_error(result)
+}
+
+fn map_trash_error(path: &Path, operation: &str, result: HRESULT) -> CoreError {
+    CoreError::SecureTrashOperationFailed {
+        path: path.to_path_buf(),
+        operation: operation.to_owned(),
+        source: hresult_error(result),
     }
 }
 
@@ -484,6 +691,16 @@ fn wide_path(path: &Path) -> Vec<u16> {
         .collect()
 }
 
+fn shell_wide_path(path: &Path) -> Vec<u16> {
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let path = if wide.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]) {
+        &wide[4..]
+    } else {
+        &wide
+    };
+    path.iter().copied().chain(std::iter::once(0)).collect()
+}
+
 fn os_string_from_wide(name: &[u16]) -> OsString {
     OsString::from_wide(name)
 }
@@ -680,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn secure_open_retains_stable_identity_and_enables_permanent_cleanup() {
+    fn secure_open_retains_stable_identity_and_enables_cleanup() {
         let fixture = Fixture::new("stable");
         let target_path = fixture.root.join("target");
         fs::create_dir(&target_path).unwrap();
@@ -689,11 +906,11 @@ mod tests {
             .with_identity(file_identity(&fixture.root.join("target")));
         let secure = open_secure_target(&fixture.root, &target).unwrap();
         assert!(secure.capabilities().permanent);
-        assert!(!secure.capabilities().trash);
+        assert!(secure.capabilities().trash);
     }
 
     #[test]
-    fn trash_capability_is_unavailable_without_mutation() {
+    fn trash_moves_verified_target_without_mutating_contents_first() {
         let fixture = Fixture::new("unsupported-trash");
         let target_path = fixture.root.join("target");
         fs::create_dir(&target_path).unwrap();
@@ -702,19 +919,11 @@ mod tests {
             .with_identity(file_identity(&target_path));
         let secure = open_secure_target(&fixture.root, &target).unwrap();
 
-        assert_eq!(
-            secure.capabilities(),
-            super::super::CleanupCapabilities {
-                permanent: true,
-                trash: false,
-            }
-        );
-        assert!(matches!(
-            secure.move_to_trash(),
-            Err(CoreError::SecureTrashUnavailable)
-        ));
-        assert!(target_path.is_dir());
-        assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"data");
+        assert!(secure.capabilities().trash);
+        secure
+            .move_to_trash()
+            .expect("verified target should move to Recycle Bin");
+        assert!(!target_path.exists());
     }
 
     #[test]
