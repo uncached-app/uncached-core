@@ -277,6 +277,19 @@ mod tests {
                 CoreErrorCode::SecureTrashUnavailable,
                 "secure_trash_unavailable",
             ),
+            (
+                CoreErrorCode::SecureTrashInitializationFailed,
+                "secure_trash_initialization_failed",
+            ),
+            (
+                CoreErrorCode::SecureTrashOperationFailed,
+                "secure_trash_operation_failed",
+            ),
+            (CoreErrorCode::SecureTrashAborted, "secure_trash_aborted"),
+            (
+                CoreErrorCode::SecureTrashPostconditionFailed,
+                "secure_trash_postcondition_failed",
+            ),
         ];
 
         for (code, expected) in cases {
@@ -406,6 +419,42 @@ mod tests {
                 CoreErrorCode::SecureTrashUnavailable,
                 "secure Trash is unavailable",
                 None,
+                None,
+            ),
+            (
+                CoreError::SecureTrashInitializationFailed { source: io_error() },
+                CoreErrorCode::SecureTrashInitializationFailed,
+                "secure Trash initialization failed",
+                None,
+                None,
+            ),
+            (
+                CoreError::SecureTrashOperationFailed {
+                    path: "target".into(),
+                    operation: "move_to_trash".into(),
+                    source: io_error(),
+                },
+                CoreErrorCode::SecureTrashOperationFailed,
+                "secure Trash operation failed",
+                Some("target"),
+                Some("move_to_trash"),
+            ),
+            (
+                CoreError::SecureTrashAborted {
+                    path: "target".into(),
+                },
+                CoreErrorCode::SecureTrashAborted,
+                "secure Trash operation was aborted",
+                Some("target"),
+                None,
+            ),
+            (
+                CoreError::SecureTrashPostconditionFailed {
+                    path: "target".into(),
+                },
+                CoreErrorCode::SecureTrashPostconditionFailed,
+                "secure Trash postcondition failed",
+                Some("target"),
                 None,
             ),
         ];
