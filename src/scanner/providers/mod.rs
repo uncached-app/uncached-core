@@ -1,7 +1,7 @@
 pub(crate) mod cargo_target;
 pub(crate) mod gradle;
-pub(crate) mod node_modules;
 pub(crate) mod next;
+pub(crate) mod node_modules;
 pub(crate) mod python_cache;
 pub(crate) mod turbo;
 
