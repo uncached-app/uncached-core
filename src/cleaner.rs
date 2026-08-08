@@ -38,6 +38,15 @@ pub fn validate_clean_target(
         ));
     }
     let canonical = fs::canonicalize(&target.path)?;
+    let name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CoreError::InvalidTarget("target has invalid basename".into()))?;
+    if !scanner.matches(name) {
+        return Err(CoreError::InvalidTarget(
+            "target name does not match provider".into(),
+        ));
+    }
     if !scanner.confirm_context(&canonical) {
         return Err(CoreError::InvalidTarget("target context is invalid".into()));
     }
