@@ -8,19 +8,26 @@ impl<'de> Deserialize<'de> for CoreErrorInfo {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct ErrorInfo {
             code: crate::error::CoreErrorCode,
             message: String,
-            path: Option<String>,
-            operation: Option<String>,
+            path: Option<Option<String>>,
+            operation: Option<Option<String>>,
         }
 
         let value = ErrorInfo::deserialize(deserializer)?;
+        let path = value.path.ok_or_else(|| {
+            serde::de::Error::custom("error object is missing required key: path")
+        })?;
+        let operation = value.operation.ok_or_else(|| {
+            serde::de::Error::custom("error object is missing required key: operation")
+        })?;
         Ok(Self {
             code: value.code,
             message: value.message,
-            path: value.path,
-            operation: value.operation,
+            path,
+            operation,
         })
     }
 }
@@ -83,15 +90,22 @@ where
     {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
+        #[serde(deny_unknown_fields)]
         struct ApiEnvelopeFields<T> {
             api_version: String,
             platform: Platform,
-            data: Option<T>,
-            error: Option<CoreErrorInfo>,
+            data: Option<Option<T>>,
+            error: Option<Option<CoreErrorInfo>>,
         }
 
         let fields = ApiEnvelopeFields::deserialize(deserializer)?;
-        if fields.data.is_some() == fields.error.is_some() {
+        let data = fields.data.ok_or_else(|| {
+            serde::de::Error::custom("API envelope is missing required key: data")
+        })?;
+        let error = fields.error.ok_or_else(|| {
+            serde::de::Error::custom("API envelope is missing required key: error")
+        })?;
+        if data.is_some() == error.is_some() {
             return Err(serde::de::Error::custom(
                 "API envelope must contain exactly one of data or error",
             ));
@@ -100,8 +114,8 @@ where
         Ok(Self {
             api_version: fields.api_version,
             platform: fields.platform,
-            data: fields.data,
-            error: fields.error,
+            data,
+            error,
         })
     }
 }

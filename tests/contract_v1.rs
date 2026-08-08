@@ -74,6 +74,123 @@ fn envelope_deserialization_rejects_data_and_error_both_missing() {
 }
 
 #[test]
+fn envelope_deserialization_rejects_missing_data_key() {
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "error": valid_error_value()
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
+fn envelope_deserialization_rejects_missing_error_key() {
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": {"value": 1}
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
+fn envelope_deserialization_rejects_unknown_envelope_key() {
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": {"value": 1},
+        "error": null,
+        "extra": true
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+fn valid_error_value() -> serde_json::Value {
+    json!({
+        "code": "io",
+        "message": "I/O error",
+        "path": null,
+        "operation": null
+    })
+}
+
+#[test]
+fn error_deserialization_rejects_missing_code_key() {
+    let mut error = valid_error_value();
+    error.as_object_mut().unwrap().remove("code");
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": null,
+        "error": error
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
+fn error_deserialization_rejects_missing_message_key() {
+    let mut error = valid_error_value();
+    error.as_object_mut().unwrap().remove("message");
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": null,
+        "error": error
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
+fn error_deserialization_rejects_missing_path_key() {
+    let mut error = valid_error_value();
+    error.as_object_mut().unwrap().remove("path");
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": null,
+        "error": error
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
+fn error_deserialization_rejects_missing_operation_key() {
+    let mut error = valid_error_value();
+    error.as_object_mut().unwrap().remove("operation");
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": null,
+        "error": error
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
+fn error_deserialization_rejects_unknown_error_key() {
+    let mut error = valid_error_value();
+    error
+        .as_object_mut()
+        .unwrap()
+        .insert("extra".into(), true.into());
+    let value = json!({
+        "apiVersion": "v1",
+        "platform": "windows",
+        "data": null,
+        "error": error
+    });
+
+    assert!(serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).is_err());
+}
+
+#[test]
 fn envelope_accessors_expose_read_only_contract_state() {
     let success = ApiEnvelope::success(Platform::Windows, json!({"value": 1}));
     assert_eq!(success.api_version(), "v1");
