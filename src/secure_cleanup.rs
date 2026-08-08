@@ -172,6 +172,7 @@ mod tests {
     use crate::error::CoreError;
     use crate::model::{Category, ScanTarget};
     use crate::scanner::ProviderSet;
+    use serde_json::json;
     use std::path::PathBuf;
 
     fn target() -> ScanTarget {
@@ -184,23 +185,49 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_secure_operations_return_typed_errors() {
+    fn unsupported_backend_permanent_cleanup_serializes_production_contract() {
         let secure_target = SecureTarget {
             backend: super::BackendTarget::Unsupported,
         };
 
+        let error = secure_target
+            .delete_permanently()
+            .expect_err("unsupported backend must reject permanent cleanup");
         assert!(matches!(
-            secure_target.delete_permanently(),
-            Err(CoreError::SecureOperationUnsupported { .. })
+            error,
+            CoreError::SecureOperationUnsupported { .. }
         ));
 
+        let value = serde_json::to_value(error.public_info()).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "code": "secure_operation_unsupported",
+                "message": "secure operation unsupported",
+                "path": "",
+                "operation": "permanent cleanup",
+            })
+        );
+    }
+
+    #[test]
+    fn unsupported_backend_trash_error_intentionally_has_no_operation_contract_field() {
+        // Trash-unavailable is a capability error, not an operation-specific failure.
         let secure_target = SecureTarget {
             backend: super::BackendTarget::Unsupported,
         };
-        assert!(matches!(
-            secure_target.move_to_trash(),
-            Err(CoreError::SecureTrashUnavailable)
-        ));
+        let error = secure_target
+            .move_to_trash()
+            .expect_err("unsupported backend must reject Trash cleanup");
+
+        assert!(matches!(error, CoreError::SecureTrashUnavailable));
+        let info = error.public_info();
+        assert_eq!(
+            info.code,
+            crate::error::CoreErrorCode::SecureTrashUnavailable
+        );
+        assert_eq!(info.operation, None);
+        assert!(serde_json::to_value(info).unwrap()["operation"].is_null());
     }
 
     #[test]

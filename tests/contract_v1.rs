@@ -301,26 +301,6 @@ fn every_public_error_preserves_contract_shape_without_native_details() {
     }
 }
 
-#[test]
-fn unsupported_cleanup_operations_fail_closed_with_operation_keys() {
-    let permanent = CoreError::SecureOperationUnsupported {
-        path: "target".into(),
-        operation: "permanent_cleanup".into(),
-        source: std::io::Error::other("private-native-detail"),
-    }
-    .public_info();
-    assert_eq!(permanent.code, CoreErrorCode::SecureOperationUnsupported);
-    assert_eq!(permanent.operation.as_deref(), Some("permanent_cleanup"));
-    assert!(!serde_json::to_value(&permanent)
-        .unwrap()
-        .to_string()
-        .contains("private-native-detail"));
-
-    let trash = CoreError::SecureTrashUnavailable.public_info();
-    assert_eq!(trash.code, CoreErrorCode::SecureTrashUnavailable);
-    assert_eq!(trash.operation, None);
-}
-
 #[cfg(not(any(
     windows,
     target_os = "linux",
