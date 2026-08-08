@@ -65,3 +65,38 @@ passed
 
 - Unix runtime tests need a Linux/macOS runner with native linker available; this Windows environment only provided Unix cross-compilation.
 - Top-level Unix permanent cleanup is intentionally unavailable until a platform primitive can prove identity-preserving removal. This is fail-closed but leaves cleanup unperformed.
+
+## Review Fixes
+
+- Replaced path-only workspace opening with component-by-component `openat` traversal from `/` or `.` using `O_NOFOLLOW`, including all workspace ancestors.
+- Implemented FD-relative child enumeration with `readdir` on a duplicated directory FD.
+- Implemented recursive child deletion using `fstatat(AT_SYMLINK_NOFOLLOW)`, `openat(O_NOFOLLOW)`, and `unlinkat`; symlink entries are rejected.
+- Kept top-level directory deletion fail-closed and before mutation because Unix `unlinkat` cannot bind removal to the retained target identity.
+- Added real `cfg(unix)` tests for identity mismatch, direct symlink, symlinked ancestor, unsupported top-level deletion, and nested FD-relative child removal.
+- Documented unsafe native calls and ownership transfers, including valid descriptors, NUL-free names, initialized stat storage, and `OwnedFd`/`DIR*` ownership.
+
+## Fix Verification
+
+RED test attempt after adding Unix tests:
+
+```text
+cargo test --target x86_64-unknown-linux-gnu secure_cleanup::unix::tests -- --nocapture
+error: linker `cc` not found
+```
+
+The Unix test binary could not link on this Windows host, so no Unix runtime result is claimed.
+
+GREEN/build evidence:
+
+```text
+cargo check --target x86_64-unknown-linux-gnu
+Finished `dev` profile
+
+cargo test
+50 passed, 0 failed
+
+cargo fmt --all -- --check
+passed
+```
+
+The focused Unix test command was rerun after implementation and failed at the same missing Linux linker boundary. `git diff --check` passed before commit.

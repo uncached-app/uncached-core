@@ -1,7 +1,7 @@
 use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
@@ -34,8 +34,7 @@ impl UnixTarget {
     }
 }
 
-pub(super) fn open_secure_target(_root: &Path, target: &ScanTarget) -> CoreResult<UnixTarget> {
-    let root = _root;
+pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult<UnixTarget> {
     let relative =
         target
             .path
@@ -60,7 +59,7 @@ pub(super) fn open_secure_target(_root: &Path, target: &ScanTarget) -> CoreResul
         }
     };
 
-    let workspace = open_directory_at(libc::AT_FDCWD, root.as_os_str().as_bytes(), &target.path)?;
+    let workspace = open_workspace(root, &target.path)?;
     let mut parent = duplicate_fd(workspace.as_raw_fd(), &target.path)?;
     for component in components {
         let Component::Normal(name) = component else {
@@ -104,6 +103,8 @@ fn open_directory_at(parent: RawFd, path: &[u8], display: &Path) -> CoreResult<O
         path: display.to_path_buf(),
         source: invalid_input("path contains NUL"),
     })?;
+    // SAFETY: `parent` is an open directory FD owned by this module, and `path`
+    // is a NUL-terminated CString. O_NOFOLLOW prevents symlink traversal.
     let fd = unsafe { libc::openat(parent, path.as_ptr(), OPEN_FLAGS | libc::O_NOFOLLOW) };
     if fd < 0 {
         let source = std::io::Error::last_os_error();
@@ -117,10 +118,48 @@ fn open_directory_at(parent: RawFd, path: &[u8], display: &Path) -> CoreResult<O
             source,
         });
     }
+    // SAFETY: successful openat returned a unique owned descriptor.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// Opens every workspace component without following symlinked ancestors.
+fn open_workspace(root: &Path, display: &Path) -> CoreResult<OwnedFd> {
+    let absolute = root.is_absolute();
+    let mut components = root.components();
+    let mut current = if absolute {
+        open_directory_at(libc::AT_FDCWD, b"/", display)?
+    } else {
+        open_directory_at(libc::AT_FDCWD, b".", display)?
+    };
+
+    for component in components.by_ref() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                let name = CString::new(name.as_bytes()).map_err(|_| {
+                    CoreError::SecureTargetOpenFailed {
+                        path: display.to_path_buf(),
+                        source: invalid_input("workspace component contains NUL"),
+                    }
+                })?;
+                current = open_directory_at(current.as_raw_fd(), name.as_bytes(), display)?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(CoreError::SecureTargetOpenFailed {
+                    path: display.to_path_buf(),
+                    source: invalid_input("workspace contains unsupported component"),
+                });
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// Duplicates a valid open descriptor and transfers ownership to `OwnedFd`.
 fn duplicate_fd(fd: RawFd, display: &Path) -> CoreResult<OwnedFd> {
+    // SAFETY: `fd` is required to be a valid open descriptor for the duration
+    // of this call; fcntl creates a new descriptor with independent ownership.
     let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if duplicate < 0 {
         return Err(CoreError::SecureTargetOpenFailed {
@@ -128,11 +167,15 @@ fn duplicate_fd(fd: RawFd, display: &Path) -> CoreResult<OwnedFd> {
             source: std::io::Error::last_os_error(),
         });
     }
+    // SAFETY: successful fcntl returned a new descriptor owned by this call.
     Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 }
 
+/// Reads identity from a valid open descriptor into initialized stat storage.
 fn file_identity_from_fd(fd: RawFd, path: &Path) -> CoreResult<FileIdentity> {
+    // SAFETY: zeroed libc::stat is valid initialized storage for fstat.
     let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: `fd` is a valid descriptor and `metadata` points to writable storage.
     if unsafe { libc::fstat(fd, &mut metadata) } != 0 {
         return Err(CoreError::SecureTargetOpenFailed {
             path: path.to_path_buf(),
@@ -155,9 +198,12 @@ fn invalid_input(message: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
 }
 
-#[allow(dead_code)]
+/// Reads one directory entry without following its name.
 fn stat_entry_at(parent: RawFd, name: &CString, display: &Path) -> CoreResult<libc::stat> {
+    // SAFETY: zeroed libc::stat is valid initialized storage for fstatat.
     let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: `parent` is a valid directory FD, `name` is NUL-free, and
+    // `metadata` is writable initialized storage.
     if unsafe {
         libc::fstatat(
             parent,
@@ -175,7 +221,7 @@ fn stat_entry_at(parent: RawFd, name: &CString, display: &Path) -> CoreResult<li
     Ok(metadata)
 }
 
-#[allow(dead_code)]
+/// Removes one already-classified child relative to its verified parent FD.
 fn unlink_entry_at(
     parent: RawFd,
     name: &CString,
@@ -183,6 +229,7 @@ fn unlink_entry_at(
     display: &Path,
 ) -> CoreResult<()> {
     let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
+    // SAFETY: `parent` is a valid directory FD and `name` is NUL-free.
     if unsafe { libc::unlinkat(parent, name.as_ptr(), flags) } != 0 {
         return Err(CoreError::SecureDeletionFailed {
             path: display.to_path_buf(),
@@ -190,4 +237,195 @@ fn unlink_entry_at(
         });
     }
     Ok(())
+}
+
+/// Enumerates children through a directory FD; returned names contain no NUL.
+fn enumerate_children(parent: RawFd, display: &Path) -> CoreResult<Vec<CString>> {
+    let duplicate = duplicate_fd(parent, display)?;
+    let directory = duplicate.into_raw_fd();
+    // SAFETY: `directory` is a valid descriptor transferred to fdopendir.
+    let stream = unsafe { libc::fdopendir(directory) };
+    if stream.is_null() {
+        // SAFETY: fdopendir failed and retains ownership of descriptor.
+        unsafe { libc::close(directory) };
+        return Err(CoreError::SecureEnumerationFailed {
+            path: display.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `stream` is a live DIR* owned until closed below.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is NUL-terminated by readdir and valid until next call.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            names.push(name.to_owned());
+        }
+    }
+    // SAFETY: stream remains live and is closed exactly once here.
+    if unsafe { libc::closedir(stream) } != 0 {
+        return Err(CoreError::SecureEnumerationFailed {
+            path: display.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    Ok(names)
+}
+
+/// Recursively removes children relative to `parent`, rejecting symlink entries.
+fn remove_children(parent: RawFd, display: &Path) -> CoreResult<()> {
+    for name in enumerate_children(parent, display)? {
+        let child_display = display.join(name.to_string_lossy().as_ref());
+        let metadata = stat_entry_at(parent, &name, &child_display)?;
+        let mode = metadata.st_mode & libc::S_IFMT;
+        if mode == libc::S_IFLNK {
+            return Err(CoreError::TargetReparsePoint {
+                path: child_display,
+            });
+        }
+        if mode == libc::S_IFDIR {
+            let child = open_directory_at(parent, name.as_bytes(), &child_display)?;
+            remove_children(child.as_raw_fd(), &child_display)?;
+            unlink_entry_at(parent, &name, true, &child_display)?;
+        } else {
+            unlink_entry_at(parent, &name, false, &child_display)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{open_directory_at, open_secure_target, remove_children};
+    use crate::error::CoreError;
+    use crate::filesystem::file_identity;
+    use crate::model::{Category, ScanTarget};
+    use std::fs;
+    use std::os::fd::AsRawFd;
+    use std::path::PathBuf;
+
+    #[test]
+    fn rejects_target_when_identity_does_not_match() {
+        let fixture = Fixture::new("identity-mismatch");
+        let target = fixture
+            .target("target")
+            .with_identity(Some(crate::model::FileIdentity {
+                volume_serial: 0,
+                file_id: [0; 16],
+            }));
+
+        assert!(matches!(
+            open_secure_target(&fixture.root, &target),
+            Err(CoreError::TargetIdentityChanged { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_direct_symlink_target() {
+        let fixture = Fixture::new("direct-symlink");
+        fs::create_dir(fixture.root.join("real")).expect("real target should exist");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("real", fixture.root.join("target"))
+            .expect("target symlink should be created");
+        let identity = file_identity(&fixture.root.join("real"));
+        let target = ScanTarget::new(fixture.root.join("target"), Category::NodeModules, 0)
+            .with_identity(identity);
+
+        assert!(matches!(
+            open_secure_target(&fixture.root, &target),
+            Err(CoreError::TargetReparsePoint { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_symlinked_ancestor() {
+        let fixture = Fixture::new("ancestor-symlink");
+        let real = fixture.root.join("real");
+        fs::create_dir(&real).expect("real ancestor should exist");
+        fs::create_dir(real.join("target")).expect("target should exist");
+        std::os::unix::fs::symlink("real", fixture.root.join("link"))
+            .expect("ancestor symlink should be created");
+        let target = fixture.root.join("link").join("target");
+        let scan_target = ScanTarget::new(target, Category::NodeModules, 0)
+            .with_identity(file_identity(&real.join("target")));
+
+        assert!(matches!(
+            open_secure_target(&fixture.root, &scan_target),
+            Err(CoreError::TargetReparsePoint { .. })
+        ));
+    }
+
+    #[test]
+    fn unsupported_top_level_deletion_does_not_mutate_target() {
+        let fixture = Fixture::new("unsupported-delete");
+        let target_path = fixture.root.join("target");
+        fs::create_dir(&target_path).expect("target should exist");
+        fs::write(target_path.join("child"), b"data").expect("child should exist");
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(file_identity(&target_path));
+        let secure_target =
+            open_secure_target(&fixture.root, &target).expect("identity-bound target should open");
+
+        assert!(matches!(
+            secure_target.delete_permanently(),
+            Err(CoreError::SecureOperationUnsupported { .. })
+        ));
+        assert!(target_path.join("child").is_file());
+    }
+
+    #[test]
+    fn removes_nested_children_relative_to_verified_directory_fd() {
+        let fixture = Fixture::new("recursive-delete");
+        let target_path = fixture.root.join("target");
+        fs::create_dir(&target_path).expect("target should exist");
+        fs::create_dir(target_path.join("nested")).expect("nested directory should exist");
+        fs::write(target_path.join("nested").join("child"), b"data").expect("child should exist");
+        let target = fixture
+            .target("other")
+            .with_identity(file_identity(&fixture.root.join("other")));
+        let secure_target =
+            open_secure_target(&fixture.root, &target).expect("identity-bound target should open");
+        let target_fd =
+            open_directory_at(secure_target._parent.as_raw_fd(), b"target", &target_path)
+                .expect("nested target should open");
+
+        remove_children(target_fd.as_raw_fd(), &target_path).expect("children should be removed");
+        assert!(fs::read_dir(&target_path)
+            .expect("target should remain readable")
+            .next()
+            .is_none());
+    }
+
+    struct Fixture {
+        root: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "uncached-core-secure-{label}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).expect("fixture root should be created");
+            Self { root }
+        }
+
+        fn target(&self, name: &str) -> ScanTarget {
+            let path = self.root.join(name);
+            fs::create_dir(&path).expect("target should be created");
+            ScanTarget::new(path, Category::NodeModules, 0)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 }
