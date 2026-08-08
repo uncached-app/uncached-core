@@ -244,37 +244,64 @@ mod tests {
             (
                 CoreError::InvalidWorkspace("workspace missing".into()),
                 CoreErrorCode::InvalidWorkspace,
+                "invalid workspace",
+                None,
+                None,
             ),
             (
                 CoreError::InvalidTarget("target missing".into()),
                 CoreErrorCode::InvalidTarget,
+                "invalid scan target",
+                None,
+                None,
             ),
-            (CoreError::Io(io_error()), CoreErrorCode::Io),
+            (
+                CoreError::Io(io_error()),
+                CoreErrorCode::Io,
+                "I/O error",
+                None,
+                None,
+            ),
             (
                 CoreError::Trash("trash failed".into()),
                 CoreErrorCode::Trash,
+                "trash error",
+                None,
+                None,
             ),
             (
                 CoreError::RecycleBinTooLarge,
                 CoreErrorCode::RecycleBinTooLarge,
+                "target is too large for the Recycle Bin",
+                None,
+                None,
             ),
             (
                 CoreError::TargetIdentityUnavailable {
                     path: "target".into(),
                 },
                 CoreErrorCode::TargetIdentityUnavailable,
+                "target identity unavailable",
+                Some("target"),
+                None,
             ),
             (
                 CoreError::TargetIdentityChanged {
                     path: "target".into(),
                 },
                 CoreErrorCode::TargetIdentityChanged,
+                "target identity changed",
+                Some("target"),
+                None,
             ),
             (
                 CoreError::TargetReparsePoint {
                     path: "target".into(),
                 },
                 CoreErrorCode::TargetReparsePoint,
+                "target or ancestor is a reparse point or symlink",
+                Some("target"),
+                None,
             ),
             (
                 CoreError::SecureOperationUnsupported {
@@ -283,6 +310,9 @@ mod tests {
                     source: io_error(),
                 },
                 CoreErrorCode::SecureOperationUnsupported,
+                "secure operation unsupported",
+                Some("target"),
+                Some("delete"),
             ),
             (
                 CoreError::SecureTargetOpenFailed {
@@ -290,6 +320,9 @@ mod tests {
                     source: io_error(),
                 },
                 CoreErrorCode::SecureTargetOpenFailed,
+                "secure target open failed",
+                Some("target"),
+                None,
             ),
             (
                 CoreError::SecureEnumerationFailed {
@@ -297,6 +330,9 @@ mod tests {
                     source: io_error(),
                 },
                 CoreErrorCode::SecureEnumerationFailed,
+                "secure enumeration failed",
+                Some("target"),
+                None,
             ),
             (
                 CoreError::SecureHandleQueryFailed {
@@ -305,6 +341,9 @@ mod tests {
                     source: io_error(),
                 },
                 CoreErrorCode::SecureHandleQueryFailed,
+                "secure handle query failed",
+                Some("target"),
+                Some("query"),
             ),
             (
                 CoreError::SecureDeletionFailed {
@@ -312,15 +351,26 @@ mod tests {
                     source: io_error(),
                 },
                 CoreErrorCode::SecureDeletionFailed,
+                "secure deletion failed",
+                Some("target"),
+                None,
             ),
             (
                 CoreError::SecureTrashUnavailable,
                 CoreErrorCode::SecureTrashUnavailable,
+                "secure Trash is unavailable",
+                None,
+                None,
             ),
         ];
 
-        for (error, expected_code) in cases {
-            assert_eq!(error.public_info().code, expected_code);
+        for (error, expected_code, expected_message, expected_path, expected_operation) in cases {
+            let info = error.public_info();
+
+            assert_eq!(info.code, expected_code);
+            assert_eq!(info.message, expected_message);
+            assert_eq!(info.path.as_deref(), expected_path);
+            assert_eq!(info.operation.as_deref(), expected_operation);
         }
     }
 
@@ -367,32 +417,71 @@ mod tests {
     }
 
     #[test]
-    fn public_info_json_contains_only_public_fields_and_no_native_source() {
-        let error = CoreError::SecureTargetOpenFailed {
-            path: "target".into(),
-            source: io_error(),
-        };
-        let display = error.to_string();
-        let json = serde_json::to_value(error.public_info()).unwrap();
-        let json_text = json.to_string();
+    fn public_info_json_has_exact_shape_and_excludes_native_details() {
+        let errors = [
+            CoreError::InvalidWorkspace("private-workspace-detail".into()),
+            CoreError::InvalidTarget("private-target-detail".into()),
+            CoreError::Io(io_error()),
+            CoreError::Trash("private-trash-detail".into()),
+            CoreError::RecycleBinTooLarge,
+            CoreError::TargetIdentityUnavailable {
+                path: "target".into(),
+            },
+            CoreError::TargetIdentityChanged {
+                path: "target".into(),
+            },
+            CoreError::TargetReparsePoint {
+                path: "target".into(),
+            },
+            CoreError::SecureOperationUnsupported {
+                path: "target".into(),
+                operation: "delete".into(),
+                source: io_error(),
+            },
+            CoreError::SecureTargetOpenFailed {
+                path: "target".into(),
+                source: io_error(),
+            },
+            CoreError::SecureEnumerationFailed {
+                path: "target".into(),
+                source: io_error(),
+            },
+            CoreError::SecureHandleQueryFailed {
+                path: "target".into(),
+                operation: "query",
+                source: io_error(),
+            },
+            CoreError::SecureDeletionFailed {
+                path: "target".into(),
+                source: io_error(),
+            },
+            CoreError::SecureTrashUnavailable,
+        ];
 
-        assert_eq!(
-            json,
-            json!({
-                "code": "secure_target_open_failed",
-                "message": "secure target open failed",
-                "path": "target",
-                "operation": null,
-            })
-        );
-        assert!(!json.as_object().unwrap().contains_key("source"));
-        assert!(!json_text.contains("private-native-detail-7f3c"));
-        assert!(!json_text.contains("Permission denied"));
-        assert_eq!(
-            display,
-            "secure target open failed for target: private-native-detail-7f3c"
-        );
-        assert!(error.source().is_some());
+        for error in errors {
+            let display = error.to_string();
+            let json = serde_json::to_value(error.public_info()).unwrap();
+            let object = json.as_object().unwrap();
+            let round_trip: serde_json::Value = serde_json::from_str(&json.to_string()).unwrap();
+
+            assert_eq!(object.len(), 4);
+            assert!(object.contains_key("code"));
+            assert!(object.contains_key("message"));
+            assert!(object.contains_key("path"));
+            assert!(object.contains_key("operation"));
+            assert_eq!(round_trip, json);
+            assert!(!json.to_string().contains("source"));
+            assert!(!json.to_string().contains("private-native-detail-7f3c"));
+            assert!(!json.to_string().contains("Permission denied"));
+
+            if matches!(
+                error,
+                CoreError::Io(_) | CoreError::SecureTargetOpenFailed { .. }
+            ) {
+                assert!(display.contains("private-native-detail-7f3c"));
+                assert!(error.source().is_some());
+            }
+        }
     }
 
     #[test]
