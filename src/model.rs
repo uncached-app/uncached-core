@@ -13,9 +13,17 @@ pub enum ScanOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Category {
     NodeModules,
+    CargoTarget,
+    NextJs,
+    Turbo,
+    PyCache,
+    Gradle,
+    DotNetObj,
+    Docker,
+    Custom(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

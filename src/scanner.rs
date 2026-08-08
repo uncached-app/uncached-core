@@ -84,6 +84,13 @@ impl ProviderSet {
     pub fn is_empty(&self) -> bool {
         self.scanners.is_empty()
     }
+
+    pub fn scanner_for(&self, category: Category) -> Option<&dyn Scanner> {
+        self.scanners
+            .iter()
+            .find(|scanner| scanner.category() == category)
+            .map(Box::as_ref)
+    }
 }
 
 impl Default for ProviderSet {
