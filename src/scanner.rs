@@ -15,6 +15,11 @@ pub trait Scanner: Send + Sync {
 }
 
 pub struct NodeModulesScanner;
+pub struct CargoTargetScanner;
+pub struct NextCacheScanner;
+pub struct TurboCacheScanner;
+pub struct PyCacheScanner;
+pub struct GradleScanner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraversalControl {
@@ -77,6 +82,19 @@ impl ProviderSet {
         }
     }
 
+    pub fn all() -> Self {
+        Self {
+            scanners: vec![
+                Box::new(NodeModulesScanner),
+                Box::new(CargoTargetScanner),
+                Box::new(NextCacheScanner),
+                Box::new(TurboCacheScanner),
+                Box::new(PyCacheScanner),
+                Box::new(GradleScanner),
+            ],
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.scanners.len()
     }
@@ -90,6 +108,80 @@ impl ProviderSet {
             .iter()
             .find(|scanner| scanner.category() == category)
             .map(Box::as_ref)
+    }
+}
+
+impl Scanner for CargoTargetScanner {
+    fn category(&self) -> Category {
+        Category::CargoTarget
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        name == "target"
+    }
+
+    fn confirm_context(&self, path: &Path) -> bool {
+        path.parent()
+            .is_some_and(|parent| parent.join("Cargo.toml").exists())
+    }
+}
+
+impl Scanner for NextCacheScanner {
+    fn category(&self) -> Category {
+        Category::NextJs
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        name == ".next"
+    }
+
+    fn confirm_context(&self, path: &Path) -> bool {
+        path.parent()
+            .is_some_and(|parent| parent.join("package.json").exists())
+    }
+}
+
+impl Scanner for TurboCacheScanner {
+    fn category(&self) -> Category {
+        Category::Turbo
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        name == ".turbo"
+    }
+
+    fn confirm_context(&self, path: &Path) -> bool {
+        path.parent().is_some_and(|parent| {
+            parent.join("package.json").exists() || parent.join("turbo.json").exists()
+        })
+    }
+}
+
+impl Scanner for PyCacheScanner {
+    fn category(&self) -> Category {
+        Category::PyCache
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        matches!(name, "__pycache__" | ".pytest_cache" | ".mypy_cache")
+    }
+
+    fn confirm_context(&self, _path: &Path) -> bool {
+        true
+    }
+}
+
+impl Scanner for GradleScanner {
+    fn category(&self) -> Category {
+        Category::Gradle
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        name == ".gradle"
+    }
+
+    fn confirm_context(&self, _path: &Path) -> bool {
+        true
     }
 }
 

@@ -13,6 +13,7 @@ pub use model::{
     Category, CleanReport, FileIdentity, ScanOutcome, ScanReport, ScanTarget, TraversalOutcome,
 };
 pub use scanner::{
-    scan_workspace, scan_workspace_with_sizing, traverse_workspace, NodeModulesScanner,
-    ProviderSet, Scanner, TraversalControl, TraversalEntry,
+    scan_workspace, scan_workspace_with_sizing, traverse_workspace, CargoTargetScanner,
+    GradleScanner, NextCacheScanner, NodeModulesScanner, ProviderSet, PyCacheScanner, Scanner,
+    TraversalControl, TraversalEntry, TurboCacheScanner,
 };
