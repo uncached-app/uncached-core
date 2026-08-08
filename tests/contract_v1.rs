@@ -74,6 +74,22 @@ fn envelope_deserialization_rejects_data_and_error_both_missing() {
 }
 
 #[test]
+fn envelope_accessors_expose_read_only_contract_state() {
+    let success = ApiEnvelope::success(Platform::Windows, json!({"value": 1}));
+    assert_eq!(success.api_version(), "v1");
+    assert_eq!(success.platform(), &Platform::Windows);
+    assert_eq!(success.data(), Some(&json!({"value": 1})));
+    assert_eq!(success.error(), None);
+
+    let error = CoreError::Io(std::io::Error::other("private-native-detail")).public_info();
+    let failure = ApiEnvelope::<serde_json::Value>::failure(Platform::Linux, error.clone());
+    assert_eq!(failure.api_version(), "v1");
+    assert_eq!(failure.platform(), &Platform::Linux);
+    assert_eq!(failure.data(), None);
+    assert_eq!(failure.error(), Some(&error));
+}
+
+#[test]
 fn transport_dtos_use_camel_case_and_omit_identity() {
     let found = serde_json::to_value(TargetFoundDto {
         scan_id: "scan-1".into(),

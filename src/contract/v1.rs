@@ -67,10 +67,10 @@ pub enum Platform {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiEnvelope<T> {
-    pub api_version: String,
-    pub platform: Platform,
-    pub data: Option<T>,
-    pub error: Option<CoreErrorInfo>,
+    api_version: String,
+    platform: Platform,
+    data: Option<T>,
+    error: Option<CoreErrorInfo>,
 }
 
 impl<'de, T> Deserialize<'de> for ApiEnvelope<T>
@@ -107,6 +107,22 @@ where
 }
 
 impl<T> ApiEnvelope<T> {
+    pub fn api_version(&self) -> &str {
+        &self.api_version
+    }
+
+    pub fn platform(&self) -> &Platform {
+        &self.platform
+    }
+
+    pub fn data(&self) -> Option<&T> {
+        self.data.as_ref()
+    }
+
+    pub fn error(&self) -> Option<&CoreErrorInfo> {
+        self.error.as_ref()
+    }
+
     pub fn success(platform: Platform, data: T) -> Self {
         Self {
             api_version: API_VERSION.to_owned(),
