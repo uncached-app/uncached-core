@@ -160,8 +160,12 @@ fn platform_and_capabilities_serialize_as_contract_values() {
 fn public_capabilities_reflect_current_secure_backend() {
     let capabilities = uncached_core::cleanup_capabilities();
 
-    assert!(capabilities.secure_identity);
-    assert!(capabilities.permanent);
+    let secure_identity_supported = cfg!(windows)
+        || cfg!(any(target_os = "linux", target_os = "android"))
+        || cfg!(target_os = "macos");
+
+    assert_eq!(capabilities.secure_identity, secure_identity_supported);
+    assert_eq!(capabilities.permanent, cfg!(windows));
     assert!(!capabilities.trash);
 }
 
