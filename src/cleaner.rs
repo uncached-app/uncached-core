@@ -7,15 +7,17 @@ use crate::scanner::ProviderSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(all(test, unix))]
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(all(test, unix))]
+static SECURE_TARGET_HOOK: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
+
 pub fn validate_clean_target(
     root: &Path,
     providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<PathBuf> {
-    let root = canonical_workspace(root)?;
-    let scanner = providers
-        .scanner_for(target.category.clone())
-        .ok_or_else(|| CoreError::InvalidTarget("missing provider".into()))?;
     let expected = target
         .identity
         .ok_or_else(|| CoreError::InvalidTarget("target filesystem identity unavailable".into()))?;
@@ -26,6 +28,19 @@ pub fn validate_clean_target(
             "target filesystem identity changed".into(),
         ));
     }
+    let canonical = validate_clean_policy(root, providers, target)?;
+    Ok(canonical)
+}
+
+fn validate_clean_policy(
+    root: &Path,
+    providers: &ProviderSet,
+    target: &ScanTarget,
+) -> CoreResult<PathBuf> {
+    let root = canonical_workspace(root)?;
+    let scanner = providers
+        .scanner_for(target.category.clone())
+        .ok_or_else(|| CoreError::InvalidTarget("missing provider".into()))?;
     let metadata = fs::symlink_metadata(&target.path)
         .map_err(|_| CoreError::InvalidTarget("target does not exist".into()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -66,8 +81,13 @@ pub fn clean_to_trash(
     providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<CleanReport> {
-    clean_to_trash_with_delete(root, providers, target, |path| {
-        trash::delete(path).map_err(|error| error.to_string())
+    validate_clean_policy(root, providers, target)?;
+    let secure_target = crate::secure_cleanup::open_secure_target(root, providers, target)?;
+    #[cfg(all(test, unix))]
+    run_secure_target_hook();
+    secure_target.move_to_trash().map(|()| CleanReport {
+        freed_bytes: 0,
+        size_has_errors: true,
     })
 }
 
@@ -76,13 +96,35 @@ pub fn clean_permanently(
     providers: &ProviderSet,
     target: &ScanTarget,
 ) -> CoreResult<CleanReport> {
-    clean_permanently_with_delete_and_size(
-        root,
-        providers,
-        target,
-        |path| directory_size_report(path).map(|report| (report.bytes, report.errors > 0)),
-        |path| fs::remove_dir_all(path).map_err(CoreError::from),
-    )
+    validate_clean_policy(root, providers, target)?;
+    let secure_target = crate::secure_cleanup::open_secure_target(root, providers, target)?;
+    #[cfg(all(test, unix))]
+    run_secure_target_hook();
+    secure_target.delete_permanently()?;
+    Ok(CleanReport {
+        freed_bytes: 0,
+        size_has_errors: true,
+    })
+}
+
+#[cfg(all(test, unix))]
+fn install_secure_target_hook(hook: impl FnOnce() + Send + 'static) {
+    *SECURE_TARGET_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(Box::new(hook));
+}
+
+#[cfg(all(test, unix))]
+fn run_secure_target_hook() {
+    let hook = SECURE_TARGET_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 pub fn clean_permanently_with_delete_and_size<S, F>(
@@ -158,5 +200,121 @@ where
                 Err(CoreError::Trash(error))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_permanently;
+    #[cfg(unix)]
+    use super::install_secure_target_hook;
+    use crate::filesystem::file_identity;
+    use crate::{Category, CoreError, ProviderSet, ScanTarget};
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    #[cfg(unix)]
+    fn public_cleanup_cannot_delete_same_basename_replacement() {
+        let root = fixture();
+        let project = root.join("project");
+        let target_path = project.join("node_modules");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(target_path.join("original.txt"), b"original").unwrap();
+        fs::write(project.join("package.json"), b"{}").unwrap();
+        let identity = file_identity(&target_path).unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 8)
+            .with_identity(Some(identity));
+        let replacement = target_path.clone();
+        let original = project.join("node_modules-original");
+
+        let hook_replacement = replacement.clone();
+        let hook_original = original.clone();
+        install_secure_target_hook(move || {
+            fs::rename(&hook_replacement, &hook_original).unwrap();
+            fs::create_dir(&hook_replacement).unwrap();
+            fs::write(hook_replacement.join("replacement.txt"), b"replacement").unwrap();
+        });
+
+        let result = clean_permanently(&root, &ProviderSet::free(), &target);
+
+        #[cfg(windows)]
+        {
+            result.unwrap();
+            assert!(!original.exists());
+            assert!(replacement.join("replacement.txt").exists());
+        }
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        {
+            assert!(matches!(
+                result,
+                Err(CoreError::SecureOperationUnsupported { .. })
+            ));
+            assert!(original.join("original.txt").exists());
+            assert!(replacement.join("replacement.txt").exists());
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn public_cleanup_rejects_replaced_target_without_deleting_replacement() {
+        let root = fixture();
+        let project = root.join("project");
+        let target_path = project.join("node_modules");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(target_path.join("original.txt"), b"original").unwrap();
+        fs::write(project.join("package.json"), b"{}").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 8)
+            .with_identity(file_identity(&target_path));
+        let original = project.join("node_modules-original");
+        fs::rename(&target_path, &original).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(target_path.join("replacement.txt"), b"replacement").unwrap();
+
+        let result = clean_permanently(&root, &ProviderSet::free(), &target);
+
+        assert!(matches!(
+            result,
+            Err(CoreError::TargetIdentityChanged { .. })
+        ));
+        assert!(target_path.join("replacement.txt").exists());
+        assert!(original.join("original.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_trash_cleanup_reports_typed_unavailability_without_mutation() {
+        let root = fixture();
+        let project = root.join("project");
+        let target_path = project.join("node_modules");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(target_path.join("child.txt"), b"content").unwrap();
+        fs::write(project.join("package.json"), b"{}").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 7)
+            .with_identity(file_identity(&target_path));
+
+        let result = super::clean_to_trash(&root, &ProviderSet::free(), &target);
+
+        assert!(
+            matches!(result, Err(CoreError::SecureTrashUnavailable)),
+            "unexpected result: {result:?}"
+        );
+        assert!(target_path.join("child.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn fixture() -> PathBuf {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("unnamed").replace(':', "-");
+        let root = std::env::temp_dir().join(format!(
+            "uncached-core-cleaner-{}-{}",
+            std::process::id(),
+            thread_name
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 }
