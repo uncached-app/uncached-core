@@ -41,9 +41,21 @@ All fields below are serialized with the shown camelCase names.
 }
 ```
 
-`permanentCleanup` and `moveToTrash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection.
+`permanentCleanup` and `moveToTrash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection. `moveToTrash: true` is Windows-specific in v1; non-Windows examples and implementations must report `false`.
 
-Permanent cleanup is handle-based and provides stronger identity guarantees. On Windows, Trash uses Shell `IFileOperation` with revalidation before and after releasing verification handles. This leaves a residual Shell namespace race that cannot be made handle-atomic; ambiguous results fail closed. A `moveToTrash` capability of `true` means the backend is available, not that every target operation will succeed.
+Permanent cleanup is handle-based and provides stronger identity guarantees. On Windows, Trash uses Shell `IFileOperation` with revalidation before and after releasing verification handles. Success additionally requires an `IFileOperationProgressSink::PostDeleteItem` callback for the expected target with a successful HRESULT, no operation abort, and passing postcondition checks. External deletion without that callback returns `secure_trash_postcondition_failed`, not success. This leaves a residual Shell namespace race after callback evidence and postcondition checks that cannot be made handle-atomic; ambiguous results fail closed. A `moveToTrash` capability of `true` means the Windows backend is available, not that every target operation will succeed.
+
+The following capability example is Windows-only:
+
+```json
+{
+  "permanentCleanup": true,
+  "moveToTrash": true,
+  "secureIdentity": true
+}
+```
+
+On Linux, macOS, Android, and unsupported platforms, the same field is `false`; `secure_trash_unavailable` is an explicit backend/environment result and must not be treated as successful cleanup.
 
 ### `ScanTargetDto`
 

@@ -1,6 +1,8 @@
 use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 #[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ffi::OsString;
@@ -8,6 +10,7 @@ use std::marker::PhantomData;
 use std::mem::{offset_of, size_of, MaybeUninit};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use windows_sys::core::{GUID, HRESULT};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
@@ -23,7 +26,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
 use windows_sys::Win32::UI::Shell::{
@@ -32,6 +35,9 @@ use windows_sys::Win32::UI::Shell::{
 
 const IID_ISHELL_ITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
 const IID_IFILE_OPERATION: GUID = GUID::from_u128(0x947aab5f_0a5c_4c13_b4d6_4bf7836fc9f8);
+const IID_IFILE_OPERATION_PROGRESS_SINK: GUID =
+    GUID::from_u128(0x04b0f1a7_9490_44bc_96e1_4296a31252e2);
+const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
 
 #[cfg(test)]
 type ShellItemBoundaryHook = Box<dyn FnOnce() + Send>;
@@ -39,6 +45,7 @@ type ShellItemBoundaryHook = Box<dyn FnOnce() + Send>;
 #[cfg(test)]
 thread_local! {
     static SHELL_ITEM_BOUNDARY_HOOK: RefCell<Option<ShellItemBoundaryHook>> = RefCell::new(None);
+    static FORCE_TRASH_ABORT: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -52,6 +59,16 @@ fn run_shell_item_boundary_hook() {
     if let Some(hook) = hook {
         hook();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn force_next_trash_abort() {
+    FORCE_TRASH_ABORT.with(|abort| abort.set(true));
+}
+
+#[cfg(test)]
+fn take_forced_trash_abort() -> bool {
+    FORCE_TRASH_ABORT.with(|abort| abort.replace(false))
 }
 
 #[repr(C)]
@@ -105,6 +122,352 @@ struct IFileOperationVtbl {
     ) -> HRESULT,
     perform_operations: unsafe extern "system" fn(*mut c_void) -> HRESULT,
     get_any_operations_aborted: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT,
+}
+
+#[repr(C)]
+struct IFileOperationProgressSinkVtbl {
+    base: IUnknownVtbl,
+    start_operations: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+    finish_operations: unsafe extern "system" fn(*mut c_void, HRESULT) -> HRESULT,
+    pre_rename_item:
+        unsafe extern "system" fn(*mut c_void, u32, *mut c_void, *const u16) -> HRESULT,
+    post_rename_item: unsafe extern "system" fn(
+        *mut c_void,
+        u32,
+        *mut c_void,
+        *const u16,
+        HRESULT,
+        *mut c_void,
+    ) -> HRESULT,
+    pre_move_item: unsafe extern "system" fn(
+        *mut c_void,
+        u32,
+        *mut c_void,
+        *mut c_void,
+        *const u16,
+    ) -> HRESULT,
+    post_move_item: unsafe extern "system" fn(
+        *mut c_void,
+        u32,
+        *mut c_void,
+        *mut c_void,
+        *const u16,
+        HRESULT,
+        *mut c_void,
+    ) -> HRESULT,
+    pre_copy_item: unsafe extern "system" fn(
+        *mut c_void,
+        u32,
+        *mut c_void,
+        *mut c_void,
+        *const u16,
+    ) -> HRESULT,
+    post_copy_item: unsafe extern "system" fn(
+        *mut c_void,
+        u32,
+        *mut c_void,
+        *mut c_void,
+        *const u16,
+        HRESULT,
+        *mut c_void,
+    ) -> HRESULT,
+    pre_delete_item: unsafe extern "system" fn(*mut c_void, u32, *mut c_void) -> HRESULT,
+    post_delete_item:
+        unsafe extern "system" fn(*mut c_void, u32, *mut c_void, HRESULT, *mut c_void) -> HRESULT,
+    pre_new_item: unsafe extern "system" fn(*mut c_void, u32, *mut c_void, *const u16) -> HRESULT,
+    post_new_item: unsafe extern "system" fn(
+        *mut c_void,
+        u32,
+        *mut c_void,
+        *const u16,
+        *const u16,
+        u32,
+        HRESULT,
+        *mut c_void,
+    ) -> HRESULT,
+    update_progress: unsafe extern "system" fn(*mut c_void, u32, u32) -> HRESULT,
+    reset_timer: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+    pause_timer: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+    resume_timer: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+}
+
+#[derive(Debug, Default)]
+struct TrashProgressEvidence {
+    post_delete_hresult: Option<HRESULT>,
+    expected_target_callback: bool,
+}
+
+fn classify_trash_progress(path: &Path, evidence: &TrashProgressEvidence) -> CoreResult<()> {
+    if evidence
+        .post_delete_hresult
+        .is_some_and(|result| result >= 0)
+        && evidence.expected_target_callback
+    {
+        Ok(())
+    } else {
+        Err(CoreError::SecureTrashPostconditionFailed {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+#[repr(C)]
+struct ProgressSink {
+    vtable: *const IFileOperationProgressSinkVtbl,
+    references: std::sync::atomic::AtomicU32,
+    expected_path: PathBuf,
+    expected_item: *mut c_void,
+    evidence: Arc<Mutex<TrashProgressEvidence>>,
+}
+
+unsafe impl Send for ProgressSink {}
+unsafe impl Sync for ProgressSink {}
+
+static PROGRESS_SINK_VTABLE: IFileOperationProgressSinkVtbl = IFileOperationProgressSinkVtbl {
+    base: IUnknownVtbl {
+        query_interface: progress_sink_query_interface,
+        add_ref: progress_sink_add_ref,
+        release: progress_sink_release,
+    },
+    start_operations: progress_sink_ok,
+    finish_operations: progress_sink_finish,
+    pre_rename_item: progress_sink_pre_rename,
+    post_rename_item: progress_sink_ok_post_rename,
+    pre_move_item: progress_sink_pre_move,
+    post_move_item: progress_sink_ok_post_move,
+    pre_copy_item: progress_sink_pre_move,
+    post_copy_item: progress_sink_ok_post_move,
+    pre_delete_item: progress_sink_pre_delete,
+    post_delete_item: progress_sink_post_delete,
+    pre_new_item: progress_sink_pre_new,
+    post_new_item: progress_sink_ok_post_new,
+    update_progress: progress_sink_update,
+    reset_timer: progress_sink_ok,
+    pause_timer: progress_sink_ok,
+    resume_timer: progress_sink_ok,
+};
+
+impl ProgressSink {
+    fn allocate(
+        expected_path: &Path,
+        expected_item: *mut c_void,
+    ) -> (*mut c_void, Arc<Mutex<TrashProgressEvidence>>) {
+        let evidence = Arc::new(Mutex::new(TrashProgressEvidence::default()));
+        let sink = Box::new(Self {
+            vtable: &PROGRESS_SINK_VTABLE,
+            references: std::sync::atomic::AtomicU32::new(1),
+            expected_path: expected_path.to_path_buf(),
+            expected_item,
+            evidence: Arc::clone(&evidence),
+        });
+        (Box::into_raw(sink).cast(), evidence)
+    }
+}
+
+unsafe fn progress_sink_from_raw<'a>(raw: *mut c_void) -> &'a ProgressSink {
+    // SAFETY: COM calls provide the interface pointer originally returned by ProgressSink::new.
+    unsafe { &*(raw.cast::<ProgressSink>()) }
+}
+
+unsafe extern "system" fn progress_sink_query_interface(
+    raw: *mut c_void,
+    iid: *const GUID,
+    result: *mut *mut c_void,
+) -> HRESULT {
+    if iid.is_null() || result.is_null() {
+        return -2147467261;
+    }
+    // SAFETY: COM guarantees iid/result point to writable ABI values for this call.
+    let iid = unsafe { &*iid };
+    if guid_matches(iid, &IID_IUNKNOWN) || guid_matches(iid, &IID_IFILE_OPERATION_PROGRESS_SINK) {
+        // SAFETY: result points to caller-owned output storage and raw is a valid sink.
+        unsafe {
+            *result = raw;
+            progress_sink_add_ref(raw);
+        }
+        0
+    } else {
+        // SAFETY: result is non-null as checked above.
+        unsafe { *result = std::ptr::null_mut() };
+        -2147467262
+    }
+}
+
+unsafe fn guid_matches(left: *const GUID, right: &GUID) -> bool {
+    // SAFETY: caller validates left is non-null before comparing COM identifiers.
+    unsafe { *left }.data1 == right.data1
+        && unsafe { *left }.data2 == right.data2
+        && unsafe { *left }.data3 == right.data3
+        && unsafe { *left }.data4 == right.data4
+}
+
+unsafe extern "system" fn progress_sink_add_ref(raw: *mut c_void) -> u32 {
+    // SAFETY: raw is a live COM sink while AddRef is callable.
+    unsafe { progress_sink_from_raw(raw) }
+        .references
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1
+}
+
+unsafe extern "system" fn progress_sink_release(raw: *mut c_void) -> u32 {
+    // SAFETY: raw is a live COM sink while Release is callable.
+    let sink = unsafe { &*raw.cast::<ProgressSink>() };
+    if sink
+        .references
+        .fetch_sub(1, std::sync::atomic::Ordering::Release)
+        == 1
+    {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // SAFETY: this was the final COM reference created by Box::into_raw.
+        unsafe { drop(Box::from_raw(raw.cast::<ProgressSink>())) };
+        0
+    } else {
+        sink.references.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+unsafe extern "system" fn progress_sink_ok(_raw: *mut c_void) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_finish(_raw: *mut c_void, _result: HRESULT) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_pre_rename(
+    _raw: *mut c_void,
+    _flags: u32,
+    _item: *mut c_void,
+    _name: *const u16,
+) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_ok_post_rename(
+    _raw: *mut c_void,
+    _flags: u32,
+    _item: *mut c_void,
+    _name: *const u16,
+    _result: HRESULT,
+    _created: *mut c_void,
+) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_pre_move(
+    _raw: *mut c_void,
+    _flags: u32,
+    _item: *mut c_void,
+    _folder: *mut c_void,
+    _name: *const u16,
+) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_pre_new(
+    _raw: *mut c_void,
+    _flags: u32,
+    _folder: *mut c_void,
+    _name: *const u16,
+) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_ok_post_move(
+    _raw: *mut c_void,
+    _flags: u32,
+    _item: *mut c_void,
+    _folder: *mut c_void,
+    _name: *const u16,
+    _result: HRESULT,
+    _created: *mut c_void,
+) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_pre_delete(
+    _raw: *mut c_void,
+    _flags: u32,
+    _item: *mut c_void,
+) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_post_delete(
+    raw: *mut c_void,
+    _flags: u32,
+    item: *mut c_void,
+    result: HRESULT,
+    _created: *mut c_void,
+) -> HRESULT {
+    // SAFETY: raw is the sink instance supplied by COM and item is an optional IShellItem.
+    let sink = unsafe { progress_sink_from_raw(raw) };
+    let expected = item == sink.expected_item
+        || unsafe { shell_item_path(item) }
+            .is_some_and(|callback| shell_paths_equal(&callback, &sink.expected_path));
+    if let Ok(mut evidence) = sink.evidence.lock() {
+        if expected {
+            evidence.post_delete_hresult = Some(result);
+            evidence.expected_target_callback = true;
+        } else if evidence.post_delete_hresult.is_none() {
+            evidence.post_delete_hresult = Some(result);
+        }
+    }
+    0
+}
+
+fn shell_paths_equal(left: &Path, right: &Path) -> bool {
+    shell_wide_path(left) == shell_wide_path(right)
+}
+
+unsafe fn shell_item_path(item: *mut c_void) -> Option<PathBuf> {
+    if item.is_null() {
+        return None;
+    }
+    let vtable = unsafe { *(item as *mut *const ShellItemVtbl) };
+    let mut display_name = std::ptr::null_mut();
+    let result = unsafe { ((*vtable).get_display_name)(item, 0x8005_8000, &mut display_name) };
+    if result < 0 || display_name.is_null() {
+        return None;
+    }
+    let mut length = 0;
+    while unsafe { *display_name.add(length) } != 0 {
+        length += 1;
+    }
+    let path = PathBuf::from(OsString::from_wide(unsafe {
+        std::slice::from_raw_parts(display_name, length)
+    }));
+    unsafe { CoTaskMemFree(display_name.cast()) };
+    Some(path)
+}
+
+#[repr(C)]
+struct ShellItemVtbl {
+    base: IUnknownVtbl,
+    bind_to_handler: *const c_void,
+    get_parent: *const c_void,
+    get_display_name: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16) -> HRESULT,
+}
+
+unsafe extern "system" fn progress_sink_ok_post_new(
+    _raw: *mut c_void,
+    _flags: u32,
+    _folder: *mut c_void,
+    _name: *const u16,
+    _template: *const u16,
+    _attributes: u32,
+    _result: HRESULT,
+    _item: *mut c_void,
+) -> HRESULT {
+    0
+}
+
+unsafe extern "system" fn progress_sink_update(
+    _raw: *mut c_void,
+    _total: u32,
+    _done: u32,
+) -> HRESULT {
+    0
 }
 
 #[derive(Debug)]
@@ -307,28 +670,57 @@ impl WindowsTarget {
         if result < 0 {
             return Err(map_trash_error(&path, "SetOperationFlags", result));
         }
-        // SAFETY: shell_item is valid and progress sink is intentionally null.
-        let result = unsafe {
-            ((*vtable).delete_item)(file_operation.ptr, shell_item.ptr, std::ptr::null_mut())
-        };
+        let (sink, evidence) = ProgressSink::allocate(&path, shell_item.ptr);
+        let mut cookie = 0;
+        // SAFETY: sink is a valid IFileOperationProgressSink ABI pointer and cookie is writable.
+        unsafe { progress_sink_add_ref(sink) };
+        unsafe { progress_sink_release(sink) };
+        let result = unsafe { ((*vtable).advise)(file_operation.ptr, sink, &mut cookie) };
+        // Release sink's construction reference. Successful Advise retains its own reference.
+        unsafe { progress_sink_release(sink) };
         if result < 0 {
-            return Err(map_trash_error(&path, "DeleteItem", result));
+            return Err(map_trash_error(&path, "Advise", result));
         }
-        // SAFETY: queued operation belongs to valid file_operation object.
-        let result = unsafe { ((*vtable).perform_operations)(file_operation.ptr) };
-        if result < 0 {
-            return Err(map_trash_error(&path, "PerformOperations", result));
+
+        let operation_result = (|| {
+            // SAFETY: shell_item and progress subscription are valid COM objects.
+            let result = unsafe {
+                ((*vtable).delete_item)(file_operation.ptr, shell_item.ptr, std::ptr::null_mut())
+            };
+            if result < 0 {
+                return Err(map_trash_error(&path, "DeleteItem", result));
+            }
+            #[cfg(test)]
+            if take_forced_trash_abort() {
+                return Err(CoreError::SecureTrashAborted { path: path.clone() });
+            }
+            // SAFETY: queued operation belongs to valid file_operation object.
+            let result = unsafe { ((*vtable).perform_operations)(file_operation.ptr) };
+            if result < 0 {
+                return Err(map_trash_error(&path, "PerformOperations", result));
+            }
+            let mut aborted = 0;
+            // SAFETY: output pointer is valid and object remains alive.
+            let result =
+                unsafe { ((*vtable).get_any_operations_aborted)(file_operation.ptr, &mut aborted) };
+            if result < 0 {
+                return Err(map_trash_error(&path, "GetAnyOperationsAborted", result));
+            }
+            if aborted != 0 {
+                return Err(CoreError::SecureTrashAborted { path: path.clone() });
+            }
+            let evidence = evidence
+                .lock()
+                .map_err(|_| CoreError::SecureTrashPostconditionFailed { path: path.clone() })?;
+            classify_trash_progress(&path, &evidence)
+        })();
+
+        // SAFETY: file_operation remains alive and cookie came from Advise.
+        let unadvise_result = unsafe { ((*vtable).unadvise)(file_operation.ptr, cookie) };
+        if unadvise_result < 0 {
+            return Err(map_trash_error(&path, "Unadvise", unadvise_result));
         }
-        let mut aborted = 0;
-        // SAFETY: output pointer is valid and object remains alive.
-        let result =
-            unsafe { ((*vtable).get_any_operations_aborted)(file_operation.ptr, &mut aborted) };
-        if result < 0 {
-            return Err(map_trash_error(&path, "GetAnyOperationsAborted", result));
-        }
-        if aborted != 0 {
-            return Err(CoreError::SecureTrashAborted { path });
-        }
+        operation_result?;
         // PerformOperations has no handle-atomic postcondition. If the validated namespace path
         // still resolves, or cannot be classified unambiguously, fail closed rather than claim
         // the original target reached the Recycle Bin. A replacement can still win the residual
@@ -874,10 +1266,11 @@ fn open_error_path_with_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        identity_matches, map_disposition_error, map_trash_error, open_entry_with_access,
-        open_error_path_with_source, open_secure_target, os_string_from_wide,
-        parse_directory_records, revalidate_shell_ancestor, revalidate_shell_target,
-        shell_wide_path, verify_shell_target_absent, AncestorSnapshot,
+        classify_trash_progress, identity_matches, map_disposition_error, map_trash_error,
+        open_entry_with_access, open_error_path_with_source, open_secure_target,
+        os_string_from_wide, parse_directory_records, revalidate_shell_ancestor,
+        revalidate_shell_target, shell_wide_path, verify_shell_target_absent, AncestorSnapshot,
+        TrashProgressEvidence,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
@@ -930,6 +1323,48 @@ mod tests {
                     && operation == "PerformOperations"
                     && source.raw_os_error() == Some(hresult)
         ));
+    }
+
+    #[test]
+    fn trash_requires_successful_callback_for_expected_target() {
+        let path = PathBuf::from("target");
+        let evidence = TrashProgressEvidence {
+            post_delete_hresult: Some(0),
+            expected_target_callback: true,
+        };
+
+        assert!(classify_trash_progress(&path, &evidence).is_ok());
+    }
+
+    #[test]
+    fn trash_rejects_external_deletion_without_callback() {
+        let path = PathBuf::from("target");
+        let evidence = TrashProgressEvidence::default();
+
+        assert!(matches!(
+            classify_trash_progress(&path, &evidence),
+            Err(CoreError::SecureTrashPostconditionFailed { path: actual }) if actual == path
+        ));
+    }
+
+    #[test]
+    fn trash_rejects_failed_or_wrong_target_callback() {
+        let path = PathBuf::from("target");
+        for evidence in [
+            TrashProgressEvidence {
+                post_delete_hresult: Some(-1),
+                expected_target_callback: true,
+            },
+            TrashProgressEvidence {
+                post_delete_hresult: Some(0),
+                expected_target_callback: false,
+            },
+        ] {
+            assert!(matches!(
+                classify_trash_progress(&path, &evidence),
+                Err(CoreError::SecureTrashPostconditionFailed { path: actual }) if actual == path
+            ));
+        }
     }
 
     #[test]
@@ -1098,10 +1533,36 @@ mod tests {
         let secure = open_secure_target(&fixture.root, &target).unwrap();
 
         assert!(secure.capabilities().trash);
-        secure
-            .move_to_trash()
-            .expect("compiled Windows Trash backend should move target");
-        assert!(!target_path.exists());
+        match secure.move_to_trash() {
+            Ok(()) => assert!(!target_path.exists()),
+            Err(CoreError::SecureTrashUnavailable) => {
+                eprintln!("environment unavailable: Windows Shell Trash backend");
+                assert!(target_path.is_dir());
+                assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"data");
+            }
+            Err(error) => panic!("Windows Trash backend failed: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn forced_trash_abort_preserves_target_contents() {
+        let fixture = Fixture::new("forced-abort");
+        let target_path = fixture.root.join("target");
+        fs::create_dir(&target_path).unwrap();
+        fs::write(target_path.join("original.txt"), b"original").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(file_identity(&target_path));
+        let secure = open_secure_target(&fixture.root, &target).unwrap();
+
+        super::force_next_trash_abort();
+        assert!(matches!(
+            secure.move_to_trash(),
+            Err(CoreError::SecureTrashAborted { path }) if path == target_path
+        ));
+        assert_eq!(
+            fs::read(target_path.join("original.txt")).unwrap(),
+            b"original"
+        );
     }
 
     #[test]
