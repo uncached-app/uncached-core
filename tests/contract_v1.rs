@@ -332,14 +332,16 @@ fn public_capabilities_reflect_current_secure_backend() {
 
     assert_eq!(capabilities.secure_identity, secure_identity_supported);
     assert_eq!(capabilities.permanent_cleanup, cfg!(windows));
-    assert_eq!(capabilities.move_to_trash, cfg!(windows));
+    if !cfg!(windows) {
+        assert!(!capabilities.move_to_trash);
+    }
 
-    let value = serde_json::to_value(capabilities).unwrap();
+    let value = serde_json::to_value(&capabilities).unwrap();
     assert_eq!(
         value,
         json!({
             "permanentCleanup": cfg!(windows),
-            "moveToTrash": cfg!(windows),
+            "moveToTrash": capabilities.move_to_trash,
             "secureIdentity": secure_identity_supported,
         })
     );

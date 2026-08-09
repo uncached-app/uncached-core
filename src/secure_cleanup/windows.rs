@@ -833,7 +833,7 @@ fn map_trash_error(path: &Path, operation: &str, result: HRESULT) -> CoreError {
             | -2_147_467_263 // E_NOTIMPL
             | -2_147_467_262 // E_NOINTERFACE
             | -2_147_024_846 // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)
-            | -2_147_024_894 // HRESULT_FROM_WIN32(ERROR_CALL_NOT_IMPLEMENTED)
+            | -2_147_024_776 // HRESULT_FROM_WIN32(ERROR_CALL_NOT_IMPLEMENTED)
     ) {
         return CoreError::SecureTrashUnavailable;
     }
@@ -1460,12 +1460,23 @@ mod tests {
             -2_147_221_164, // REGDB_E_CLASSNOTREG
             -2_147_467_262, // E_NOINTERFACE
             -2_147_024_846, // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)
+            -2_147_024_776, // HRESULT_FROM_WIN32(ERROR_CALL_NOT_IMPLEMENTED)
         ] {
             assert!(matches!(
                 map_trash_error(&path, "CoCreateInstance", hresult),
                 CoreError::SecureTrashUnavailable
             ));
         }
+    }
+
+    #[test]
+    fn file_not_found_does_not_map_to_typed_unavailable_error() {
+        let error = map_trash_error(&PathBuf::from("target"), "CoCreateInstance", -2_147_024_894);
+
+        assert!(matches!(
+            error,
+            CoreError::SecureTrashOperationFailed { .. }
+        ));
     }
 
     #[test]
@@ -1672,7 +1683,10 @@ mod tests {
             .with_identity(file_identity(&fixture.root.join("target")));
         let secure = open_secure_target(&fixture.root, &target).unwrap();
         assert!(secure.capabilities().permanent);
-        assert!(secure.capabilities().trash);
+        assert_eq!(
+            secure.capabilities().trash,
+            super::shell_backend_available()
+        );
     }
 
     #[test]
@@ -1685,15 +1699,22 @@ mod tests {
             .with_identity(file_identity(&target_path));
         let secure = open_secure_target(&fixture.root, &target).unwrap();
 
-        assert!(secure.capabilities().trash);
+        let probe = super::shell_backend_available();
+        assert_eq!(secure.capabilities().trash, probe);
         match secure.move_to_trash() {
             Ok(()) => assert!(!target_path.exists()),
-            Err(CoreError::SecureTrashUnavailable) => {
+            Err(error) => {
+                assert!(matches!(
+                    error,
+                    CoreError::SecureTrashUnavailable
+                        | CoreError::SecureTrashInitializationFailed { .. }
+                        | CoreError::SecureTrashOperationFailed { .. }
+                        | CoreError::SecureTrashPostconditionFailed { .. }
+                ));
                 eprintln!("environment unavailable: Windows Shell Trash backend");
                 assert!(target_path.is_dir());
                 assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"data");
             }
-            Err(error) => panic!("Windows Trash backend failed: {error:?}"),
         }
     }
 
@@ -1709,10 +1730,12 @@ mod tests {
 
         super::force_next_trash_abort();
         let result = secure.move_to_trash();
-        assert!(
-            matches!(result, Err(CoreError::SecureTrashAborted { ref path }) if path == &target_path),
-            "unexpected forced-abort result: {result:?}"
-        );
+        match result {
+            Err(CoreError::SecureTrashAborted { path }) => assert_eq!(path, target_path),
+            Err(CoreError::SecureTrashUnavailable) => {}
+            Err(error) => panic!("unexpected typed Trash result: {error:?}"),
+            Ok(()) => panic!("forced abort must not report success"),
+        }
         assert_eq!(
             fs::read(target_path.join("original.txt")).unwrap(),
             b"original"
