@@ -304,7 +304,7 @@ impl WindowsTarget {
         // still resolves, or cannot be classified unambiguously, fail closed rather than claim
         // the original target reached the Recycle Bin. A replacement can still win the residual
         // race between this check and Shell's operation; that limitation is intentional.
-        verify_shell_postcondition(&path, expected_identity)?;
+        verify_shell_target_absent(&path, expected_identity, &ancestor_snapshots)?;
         Ok(())
     }
 }
@@ -350,15 +350,33 @@ fn revalidate_shell_ancestor(ancestor: &AncestorSnapshot, target: &Path) -> Core
     Ok(())
 }
 
-fn verify_shell_postcondition(path: &Path, _expected: FileIdentity) -> CoreResult<()> {
+fn verify_shell_target_absent(
+    path: &Path,
+    expected: FileIdentity,
+    ancestors: &[AncestorSnapshot],
+) -> CoreResult<()> {
+    for ancestor in ancestors {
+        revalidate_shell_ancestor(ancestor, path).map_err(|_| {
+            CoreError::SecureTrashPostconditionFailed {
+                path: path.to_path_buf(),
+            }
+        })?;
+    }
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(CoreError::SecureTrashPostconditionFailed {
             path: path.to_path_buf(),
         }),
-        Ok(_) => Err(CoreError::SecureTrashPostconditionFailed {
-            path: path.to_path_buf(),
-        }),
+        Ok(_) => match open_entry(path, path) {
+            Ok(entry) if entry.identity != expected => {
+                Err(CoreError::SecureTrashPostconditionFailed {
+                    path: path.to_path_buf(),
+                })
+            }
+            Ok(_) | Err(_) => Err(CoreError::SecureTrashPostconditionFailed {
+                path: path.to_path_buf(),
+            }),
+        },
     }
 }
 
@@ -830,7 +848,7 @@ mod tests {
         identity_matches, map_disposition_error, map_trash_error, open_entry_with_access,
         open_error_path_with_source, open_secure_target, os_string_from_wide,
         parse_directory_records, revalidate_shell_ancestor, revalidate_shell_target,
-        shell_wide_path, verify_shell_postcondition, AncestorSnapshot,
+        shell_wide_path, verify_shell_target_absent, AncestorSnapshot,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
@@ -1051,10 +1069,15 @@ mod tests {
         let secure = open_secure_target(&fixture.root, &target).unwrap();
 
         assert!(secure.capabilities().trash);
-        secure
-            .move_to_trash()
-            .expect("verified target should move to Recycle Bin");
-        assert!(!target_path.exists());
+        match secure.move_to_trash() {
+            Ok(()) => assert!(!target_path.exists()),
+            Err(CoreError::SecureTrashUnavailable)
+            | Err(CoreError::SecureOperationUnsupported { .. }) => {
+                eprintln!("skipping: Windows Trash backend unavailable or unsupported");
+                assert!(target_path.exists());
+            }
+            Err(error) => panic!("verified target should move to Recycle Bin: {error:?}"),
+        }
     }
 
     #[test]
@@ -1181,7 +1204,7 @@ mod tests {
         fs::write(target.join("replacement.txt"), b"replacement").unwrap();
 
         assert!(matches!(
-            verify_shell_postcondition(&target, expected),
+            verify_shell_target_absent(&target, expected, &[]),
             Err(CoreError::SecureTrashPostconditionFailed { path }) if path == target
         ));
         assert_eq!(
@@ -1199,7 +1222,30 @@ mod tests {
         let expected = file_identity(&target).unwrap();
         fs::remove_dir(&target).unwrap();
 
-        assert!(verify_shell_postcondition(&target, expected).is_ok());
+        assert!(verify_shell_target_absent(&target, expected, &[]).is_ok());
+    }
+
+    #[test]
+    fn shell_postcondition_rejects_missing_ancestor_as_ambiguous() {
+        let fixture = Fixture::new("postcondition-missing-ancestor");
+        let ancestor = fixture.root.join("ancestor");
+        let target = ancestor.join("target");
+        fs::create_dir(&ancestor).unwrap();
+        fs::create_dir(&target).unwrap();
+        let opened = super::open_directory(&ancestor, &target).unwrap();
+        let snapshot = AncestorSnapshot {
+            identity: opened.identity,
+            path: opened.path.clone(),
+        };
+        let expected = file_identity(&target).unwrap();
+        drop(opened);
+        fs::remove_dir(&target).unwrap();
+        fs::remove_dir(&ancestor).unwrap();
+
+        assert!(matches!(
+            verify_shell_target_absent(&target, expected, &[snapshot]),
+            Err(CoreError::SecureTrashPostconditionFailed { path }) if path == target
+        ));
     }
 
     #[test]
