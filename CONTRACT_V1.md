@@ -57,6 +57,16 @@ The following capability example is Windows-only:
 
 On Linux, macOS, Android, and unsupported platforms, the same field is `false`; `secure_trash_unavailable` is an explicit backend/environment result and must not be treated as successful cleanup.
 
+### Measured platform verification
+
+The current Windows backend was verified on `x86_64-pc-windows-msvc`: `cargo
+test` passed 131 tests. The suite includes Recycle Bin success and abort
+handling, target identity and reparse-point rejection, callback and
+postcondition validation, concurrent final-release handling, replacement
+preservation, and permanent-delete behavior. `cargo check --target
+x86_64-unknown-linux-gnu` also passed. No macOS runtime or compile result is
+claimed here when `x86_64-apple-darwin` is not installed.
+
 ### `ScanTargetDto`
 
 ```json
