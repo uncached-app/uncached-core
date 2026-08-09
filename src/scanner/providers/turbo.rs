@@ -1,5 +1,6 @@
-use super::super::Scanner;
+use crate::filesystem::has_marker_file;
 use crate::model::Category;
+use crate::scanner::Scanner;
 use std::path::Path;
 
 pub struct TurboCacheScanner;
@@ -13,7 +14,7 @@ impl Scanner for TurboCacheScanner {
     }
     fn confirm_context(&self, path: &Path) -> bool {
         path.parent().is_some_and(|parent| {
-            parent.join("package.json").exists() || parent.join("turbo.json").exists()
+            has_marker_file(parent, "package.json") || has_marker_file(parent, "turbo.json")
         })
     }
 }

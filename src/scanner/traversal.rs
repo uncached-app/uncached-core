@@ -21,6 +21,11 @@ where
         return Ok(TraversalOutcome::Cancelled);
     }
 
+    // Serial on purpose: the callback decides pruning after an entry is yielded,
+    // and a parallel walker prefetches children before that decision arrives —
+    // which is exactly the descent into confirmed artifact directories that this
+    // traversal exists to avoid. Throughput here is bounded by the pruning, not
+    // by the number of walker threads.
     let entries = WalkDir::new(&root)
         .sort(true)
         .skip_hidden(false)
@@ -55,11 +60,7 @@ where
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let category = providers
-            .scanners
-            .iter()
-            .find(|scanner| scanner.matches(&name) && scanner.confirm_context(&path))
-            .map(|scanner| scanner.category());
+        let category = providers.classify(&name, &path);
         let identity = category.as_ref().and_then(|_| file_identity(&path));
         let traversal_entry = TraversalEntry {
             path: path.clone(),

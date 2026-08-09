@@ -1,20 +1,28 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Wire-stable error codes. Serialization and deserialization both come from
+/// this derive, so the two directions cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreErrorCode {
     InvalidWorkspace,
-    InvalidTarget,
     Io,
-    Trash,
-    RecycleBinTooLarge,
+    ProviderUnavailable,
+    TargetMissing,
+    TargetNotDirectory,
+    TargetNameUnsupported,
+    TargetProviderMismatch,
+    TargetContextInvalid,
+    TargetOutsideWorkspace,
     TargetIdentityUnavailable,
     TargetIdentityChanged,
     TargetReparsePoint,
     SecureOperationUnsupported,
     SecureTargetOpenFailed,
+    SecureTargetTooLarge,
+    SecureTargetTooDeep,
     SecureEnumerationFailed,
     SecureHandleQueryFailed,
     SecureDeletionFailed,
@@ -37,14 +45,22 @@ pub struct CoreErrorInfo {
 pub enum CoreError {
     #[error("invalid workspace: {0}")]
     InvalidWorkspace(String),
-    #[error("invalid scan target: {0}")]
-    InvalidTarget(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("trash error: {0}")]
-    Trash(String),
-    #[error("target is too large for the Recycle Bin")]
-    RecycleBinTooLarge,
+    #[error("no provider is registered for the target category")]
+    ProviderUnavailable,
+    #[error("target does not exist: {path}")]
+    TargetMissing { path: PathBuf },
+    #[error("target is not a directory: {path}")]
+    TargetNotDirectory { path: PathBuf },
+    #[error("target name is not representable: {path}")]
+    TargetNameUnsupported { path: PathBuf },
+    #[error("target name does not match its provider: {path}")]
+    TargetProviderMismatch { path: PathBuf },
+    #[error("target context does not confirm its provider: {path}")]
+    TargetContextInvalid { path: PathBuf },
+    #[error("target is outside the safe workspace: {path}")]
+    TargetOutsideWorkspace { path: PathBuf },
     #[error("target identity unavailable: {path}")]
     TargetIdentityUnavailable { path: PathBuf },
     #[error("target identity changed: {path}")]
@@ -64,6 +80,10 @@ pub enum CoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("secure target exceeds {limit} entries: {path}")]
+    SecureTargetTooLarge { path: PathBuf, limit: usize },
+    #[error("secure target exceeds {limit} directory levels: {path}")]
+    SecureTargetTooDeep { path: PathBuf, limit: usize },
     #[error("secure enumeration failed for {path}: {source}")]
     SecureEnumerationFailed {
         path: PathBuf,
@@ -112,18 +132,47 @@ impl CoreError {
                 None,
                 None,
             ),
-            Self::InvalidTarget(_) => (
-                CoreErrorCode::InvalidTarget,
-                "invalid scan target",
+            Self::Io(_) => (CoreErrorCode::Io, "I/O error", None, None),
+            Self::ProviderUnavailable => (
+                CoreErrorCode::ProviderUnavailable,
+                "no provider is registered for the target category",
                 None,
                 None,
             ),
-            Self::Io(_) => (CoreErrorCode::Io, "I/O error", None, None),
-            Self::Trash(_) => (CoreErrorCode::Trash, "trash error", None, None),
-            Self::RecycleBinTooLarge => (
-                CoreErrorCode::RecycleBinTooLarge,
-                "target is too large for the Recycle Bin",
+            Self::TargetMissing { path } => (
+                CoreErrorCode::TargetMissing,
+                "target does not exist",
+                Some(path.to_string_lossy().into_owned()),
                 None,
+            ),
+            Self::TargetNotDirectory { path } => (
+                CoreErrorCode::TargetNotDirectory,
+                "target is not a directory",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::TargetNameUnsupported { path } => (
+                CoreErrorCode::TargetNameUnsupported,
+                "target name is not representable",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::TargetProviderMismatch { path } => (
+                CoreErrorCode::TargetProviderMismatch,
+                "target name does not match its provider",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::TargetContextInvalid { path } => (
+                CoreErrorCode::TargetContextInvalid,
+                "target context does not confirm its provider",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::TargetOutsideWorkspace { path } => (
+                CoreErrorCode::TargetOutsideWorkspace,
+                "target is outside the safe workspace",
+                Some(path.to_string_lossy().into_owned()),
                 None,
             ),
             Self::TargetIdentityUnavailable { path } => (
@@ -155,6 +204,18 @@ impl CoreError {
             Self::SecureTargetOpenFailed { path, .. } => (
                 CoreErrorCode::SecureTargetOpenFailed,
                 "secure target open failed",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::SecureTargetTooLarge { path, .. } => (
+                CoreErrorCode::SecureTargetTooLarge,
+                "secure target exceeds the supported entry count",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::SecureTargetTooDeep { path, .. } => (
+                CoreErrorCode::SecureTargetTooDeep,
+                "secure target exceeds the supported directory depth",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
@@ -229,6 +290,64 @@ mod tests {
     use serde_json::json;
     use std::error::Error;
 
+    /// Exhaustive by construction: a new `CoreErrorCode` variant fails to compile
+    /// here until its wire string is declared.
+    fn wire_name(code: CoreErrorCode) -> &'static str {
+        match code {
+            CoreErrorCode::InvalidWorkspace => "invalid_workspace",
+            CoreErrorCode::Io => "io",
+            CoreErrorCode::ProviderUnavailable => "provider_unavailable",
+            CoreErrorCode::TargetMissing => "target_missing",
+            CoreErrorCode::TargetNotDirectory => "target_not_directory",
+            CoreErrorCode::TargetNameUnsupported => "target_name_unsupported",
+            CoreErrorCode::TargetProviderMismatch => "target_provider_mismatch",
+            CoreErrorCode::TargetContextInvalid => "target_context_invalid",
+            CoreErrorCode::TargetOutsideWorkspace => "target_outside_workspace",
+            CoreErrorCode::TargetIdentityUnavailable => "target_identity_unavailable",
+            CoreErrorCode::TargetIdentityChanged => "target_identity_changed",
+            CoreErrorCode::TargetReparsePoint => "target_reparse_point",
+            CoreErrorCode::SecureOperationUnsupported => "secure_operation_unsupported",
+            CoreErrorCode::SecureTargetOpenFailed => "secure_target_open_failed",
+            CoreErrorCode::SecureTargetTooLarge => "secure_target_too_large",
+            CoreErrorCode::SecureTargetTooDeep => "secure_target_too_deep",
+            CoreErrorCode::SecureEnumerationFailed => "secure_enumeration_failed",
+            CoreErrorCode::SecureHandleQueryFailed => "secure_handle_query_failed",
+            CoreErrorCode::SecureDeletionFailed => "secure_deletion_failed",
+            CoreErrorCode::SecureTrashUnavailable => "secure_trash_unavailable",
+            CoreErrorCode::SecureTrashInitializationFailed => "secure_trash_initialization_failed",
+            CoreErrorCode::SecureTrashOperationFailed => "secure_trash_operation_failed",
+            CoreErrorCode::SecureTrashAborted => "secure_trash_aborted",
+            CoreErrorCode::SecureTrashPostconditionFailed => "secure_trash_postcondition_failed",
+        }
+    }
+
+    const ALL_CODES: [CoreErrorCode; 24] = [
+        CoreErrorCode::InvalidWorkspace,
+        CoreErrorCode::Io,
+        CoreErrorCode::ProviderUnavailable,
+        CoreErrorCode::TargetMissing,
+        CoreErrorCode::TargetNotDirectory,
+        CoreErrorCode::TargetNameUnsupported,
+        CoreErrorCode::TargetProviderMismatch,
+        CoreErrorCode::TargetContextInvalid,
+        CoreErrorCode::TargetOutsideWorkspace,
+        CoreErrorCode::TargetIdentityUnavailable,
+        CoreErrorCode::TargetIdentityChanged,
+        CoreErrorCode::TargetReparsePoint,
+        CoreErrorCode::SecureOperationUnsupported,
+        CoreErrorCode::SecureTargetOpenFailed,
+        CoreErrorCode::SecureTargetTooLarge,
+        CoreErrorCode::SecureTargetTooDeep,
+        CoreErrorCode::SecureEnumerationFailed,
+        CoreErrorCode::SecureHandleQueryFailed,
+        CoreErrorCode::SecureDeletionFailed,
+        CoreErrorCode::SecureTrashUnavailable,
+        CoreErrorCode::SecureTrashInitializationFailed,
+        CoreErrorCode::SecureTrashOperationFailed,
+        CoreErrorCode::SecureTrashAborted,
+        CoreErrorCode::SecureTrashPostconditionFailed,
+    ];
+
     fn io_error() -> std::io::Error {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -236,236 +355,172 @@ mod tests {
         )
     }
 
-    #[test]
-    fn error_codes_serialize_as_stable_snake_case() {
-        let cases = [
-            (CoreErrorCode::InvalidWorkspace, "invalid_workspace"),
-            (CoreErrorCode::InvalidTarget, "invalid_target"),
-            (CoreErrorCode::Io, "io"),
-            (CoreErrorCode::Trash, "trash"),
-            (CoreErrorCode::RecycleBinTooLarge, "recycle_bin_too_large"),
-            (
-                CoreErrorCode::TargetIdentityUnavailable,
-                "target_identity_unavailable",
-            ),
-            (
-                CoreErrorCode::TargetIdentityChanged,
-                "target_identity_changed",
-            ),
-            (CoreErrorCode::TargetReparsePoint, "target_reparse_point"),
-            (
-                CoreErrorCode::SecureOperationUnsupported,
-                "secure_operation_unsupported",
-            ),
-            (
-                CoreErrorCode::SecureTargetOpenFailed,
-                "secure_target_open_failed",
-            ),
-            (
-                CoreErrorCode::SecureEnumerationFailed,
-                "secure_enumeration_failed",
-            ),
-            (
-                CoreErrorCode::SecureHandleQueryFailed,
-                "secure_handle_query_failed",
-            ),
-            (
-                CoreErrorCode::SecureDeletionFailed,
-                "secure_deletion_failed",
-            ),
-            (
-                CoreErrorCode::SecureTrashUnavailable,
-                "secure_trash_unavailable",
-            ),
-            (
-                CoreErrorCode::SecureTrashInitializationFailed,
-                "secure_trash_initialization_failed",
-            ),
-            (
-                CoreErrorCode::SecureTrashOperationFailed,
-                "secure_trash_operation_failed",
-            ),
-            (CoreErrorCode::SecureTrashAborted, "secure_trash_aborted"),
-            (
-                CoreErrorCode::SecureTrashPostconditionFailed,
-                "secure_trash_postcondition_failed",
-            ),
-        ];
+    /// Every `CoreError` variant, used by the mapping and sanitization tests.
+    fn every_error() -> Vec<CoreError> {
+        vec![
+            CoreError::InvalidWorkspace("private-workspace-detail".into()),
+            CoreError::Io(io_error()),
+            CoreError::ProviderUnavailable,
+            CoreError::TargetMissing {
+                path: "target".into(),
+            },
+            CoreError::TargetNotDirectory {
+                path: "target".into(),
+            },
+            CoreError::TargetNameUnsupported {
+                path: "target".into(),
+            },
+            CoreError::TargetProviderMismatch {
+                path: "target".into(),
+            },
+            CoreError::TargetContextInvalid {
+                path: "target".into(),
+            },
+            CoreError::TargetOutsideWorkspace {
+                path: "target".into(),
+            },
+            CoreError::TargetIdentityUnavailable {
+                path: "target".into(),
+            },
+            CoreError::TargetIdentityChanged {
+                path: "target".into(),
+            },
+            CoreError::TargetReparsePoint {
+                path: "target".into(),
+            },
+            CoreError::SecureOperationUnsupported {
+                path: "target".into(),
+                operation: "delete".into(),
+                source: io_error(),
+            },
+            CoreError::SecureTargetOpenFailed {
+                path: "target".into(),
+                source: io_error(),
+            },
+            CoreError::SecureTargetTooLarge {
+                path: "target".into(),
+                limit: 8,
+            },
+            CoreError::SecureTargetTooDeep {
+                path: "target".into(),
+                limit: 4,
+            },
+            CoreError::SecureEnumerationFailed {
+                path: "target".into(),
+                source: io_error(),
+            },
+            CoreError::SecureHandleQueryFailed {
+                path: "target".into(),
+                operation: "query",
+                source: io_error(),
+            },
+            CoreError::SecureDeletionFailed {
+                path: "target".into(),
+                source: io_error(),
+            },
+            CoreError::SecureTrashUnavailable,
+            CoreError::SecureTrashInitializationFailed { source: io_error() },
+            CoreError::SecureTrashOperationFailed {
+                path: "target".into(),
+                operation: "move_to_trash".into(),
+                source: io_error(),
+            },
+            CoreError::SecureTrashAborted {
+                path: "target".into(),
+            },
+            CoreError::SecureTrashPostconditionFailed {
+                path: "target".into(),
+            },
+        ]
+    }
 
-        for (code, expected) in cases {
+    #[test]
+    fn error_codes_round_trip_as_stable_snake_case() {
+        for code in ALL_CODES {
+            let expected = wire_name(code);
             assert_eq!(serde_json::to_value(code).unwrap(), json!(expected));
+            assert_eq!(
+                serde_json::from_value::<CoreErrorCode>(json!(expected)).unwrap(),
+                code
+            );
         }
     }
 
     #[test]
-    fn public_info_maps_every_core_error_variant() {
+    fn error_code_table_covers_every_variant_exactly_once() {
+        let mut names: Vec<_> = ALL_CODES.into_iter().map(wire_name).collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+
+        assert_eq!(names.len(), unique);
+        assert_eq!(names.len(), ALL_CODES.len());
+    }
+
+    #[test]
+    fn unknown_error_codes_are_rejected() {
+        assert!(serde_json::from_value::<CoreErrorCode>(json!("nope")).is_err());
+    }
+
+    #[test]
+    fn public_info_maps_every_core_error_variant_to_a_declared_code() {
+        let mut seen = Vec::new();
+        for error in every_error() {
+            let info = error.public_info();
+            assert_eq!(
+                serde_json::to_value(info.code).unwrap(),
+                json!(wire_name(info.code))
+            );
+            seen.push(info.code);
+        }
+
+        for code in ALL_CODES {
+            assert!(seen.contains(&code), "no error maps to {code:?}");
+        }
+    }
+
+    #[test]
+    fn public_info_reports_path_for_target_scoped_errors() {
         let cases = [
             (
-                CoreError::InvalidWorkspace("workspace missing".into()),
-                CoreErrorCode::InvalidWorkspace,
-                "invalid workspace",
-                None,
-                None,
-            ),
-            (
-                CoreError::InvalidTarget("target missing".into()),
-                CoreErrorCode::InvalidTarget,
-                "invalid scan target",
-                None,
-                None,
-            ),
-            (
-                CoreError::Io(io_error()),
-                CoreErrorCode::Io,
-                "I/O error",
-                None,
-                None,
-            ),
-            (
-                CoreError::Trash("trash failed".into()),
-                CoreErrorCode::Trash,
-                "trash error",
-                None,
-                None,
-            ),
-            (
-                CoreError::RecycleBinTooLarge,
-                CoreErrorCode::RecycleBinTooLarge,
-                "target is too large for the Recycle Bin",
-                None,
-                None,
-            ),
-            (
-                CoreError::TargetIdentityUnavailable {
+                CoreError::TargetMissing {
                     path: "target".into(),
                 },
-                CoreErrorCode::TargetIdentityUnavailable,
-                "target identity unavailable",
-                Some("target"),
-                None,
+                CoreErrorCode::TargetMissing,
+                "target does not exist",
             ),
             (
-                CoreError::TargetIdentityChanged {
+                CoreError::TargetOutsideWorkspace {
                     path: "target".into(),
                 },
-                CoreErrorCode::TargetIdentityChanged,
-                "target identity changed",
-                Some("target"),
-                None,
+                CoreErrorCode::TargetOutsideWorkspace,
+                "target is outside the safe workspace",
             ),
             (
-                CoreError::TargetReparsePoint {
+                CoreError::SecureTargetTooLarge {
                     path: "target".into(),
+                    limit: 8,
                 },
-                CoreErrorCode::TargetReparsePoint,
-                "target or ancestor is a reparse point or symlink",
-                Some("target"),
-                None,
+                CoreErrorCode::SecureTargetTooLarge,
+                "secure target exceeds the supported entry count",
             ),
             (
-                CoreError::SecureOperationUnsupported {
+                CoreError::SecureTargetTooDeep {
                     path: "target".into(),
-                    operation: "delete".into(),
-                    source: io_error(),
+                    limit: 4,
                 },
-                CoreErrorCode::SecureOperationUnsupported,
-                "secure operation unsupported",
-                Some("target"),
-                Some("delete"),
-            ),
-            (
-                CoreError::SecureTargetOpenFailed {
-                    path: "target".into(),
-                    source: io_error(),
-                },
-                CoreErrorCode::SecureTargetOpenFailed,
-                "secure target open failed",
-                Some("target"),
-                None,
-            ),
-            (
-                CoreError::SecureEnumerationFailed {
-                    path: "target".into(),
-                    source: io_error(),
-                },
-                CoreErrorCode::SecureEnumerationFailed,
-                "secure enumeration failed",
-                Some("target"),
-                None,
-            ),
-            (
-                CoreError::SecureHandleQueryFailed {
-                    path: "target".into(),
-                    operation: "query",
-                    source: io_error(),
-                },
-                CoreErrorCode::SecureHandleQueryFailed,
-                "secure handle query failed",
-                Some("target"),
-                Some("query"),
-            ),
-            (
-                CoreError::SecureDeletionFailed {
-                    path: "target".into(),
-                    source: io_error(),
-                },
-                CoreErrorCode::SecureDeletionFailed,
-                "secure deletion failed",
-                Some("target"),
-                None,
-            ),
-            (
-                CoreError::SecureTrashUnavailable,
-                CoreErrorCode::SecureTrashUnavailable,
-                "secure Trash is unavailable",
-                None,
-                None,
-            ),
-            (
-                CoreError::SecureTrashInitializationFailed { source: io_error() },
-                CoreErrorCode::SecureTrashInitializationFailed,
-                "secure Trash initialization failed",
-                None,
-                None,
-            ),
-            (
-                CoreError::SecureTrashOperationFailed {
-                    path: "target".into(),
-                    operation: "move_to_trash".into(),
-                    source: io_error(),
-                },
-                CoreErrorCode::SecureTrashOperationFailed,
-                "secure Trash operation failed",
-                Some("target"),
-                Some("move_to_trash"),
-            ),
-            (
-                CoreError::SecureTrashAborted {
-                    path: "target".into(),
-                },
-                CoreErrorCode::SecureTrashAborted,
-                "secure Trash operation was aborted",
-                Some("target"),
-                None,
-            ),
-            (
-                CoreError::SecureTrashPostconditionFailed {
-                    path: "target".into(),
-                },
-                CoreErrorCode::SecureTrashPostconditionFailed,
-                "secure Trash postcondition failed",
-                Some("target"),
-                None,
+                CoreErrorCode::SecureTargetTooDeep,
+                "secure target exceeds the supported directory depth",
             ),
         ];
 
-        for (error, expected_code, expected_message, expected_path, expected_operation) in cases {
+        for (error, expected_code, expected_message) in cases {
             let info = error.public_info();
 
             assert_eq!(info.code, expected_code);
             assert_eq!(info.message, expected_message);
-            assert_eq!(info.path.as_deref(), expected_path);
-            assert_eq!(info.operation.as_deref(), expected_operation);
+            assert_eq!(info.path.as_deref(), Some("target"));
+            assert_eq!(info.operation, None);
         }
     }
 
@@ -486,24 +541,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn public_info_uses_lossy_path_conversion() {
+        use std::os::unix::ffi::OsStringExt;
+
         let error = CoreError::TargetIdentityChanged {
             path: std::path::PathBuf::from(std::ffi::OsString::from_vec(
                 b"target\xFFpath".to_vec(),
             )),
         };
 
-        assert_eq!(error.public_info().path.as_deref(), Some("target�path"));
+        assert_eq!(
+            error.public_info().path.as_deref(),
+            Some("target\u{fffd}path")
+        );
     }
 
     #[test]
     fn public_info_leaves_generic_context_absent() {
         for error in [
             CoreError::InvalidWorkspace("workspace".into()),
-            CoreError::InvalidTarget("target".into()),
             CoreError::Io(io_error()),
-            CoreError::Trash("trash".into()),
-            CoreError::RecycleBinTooLarge,
+            CoreError::ProviderUnavailable,
             CoreError::SecureTrashUnavailable,
+            CoreError::SecureTrashInitializationFailed { source: io_error() },
         ] {
             let info = error.public_info();
             assert_eq!(info.path, None);
@@ -513,47 +572,7 @@ mod tests {
 
     #[test]
     fn public_info_json_has_exact_shape_and_excludes_native_details() {
-        let errors = [
-            CoreError::InvalidWorkspace("private-workspace-detail".into()),
-            CoreError::InvalidTarget("private-target-detail".into()),
-            CoreError::Io(io_error()),
-            CoreError::Trash("private-trash-detail".into()),
-            CoreError::RecycleBinTooLarge,
-            CoreError::TargetIdentityUnavailable {
-                path: "target".into(),
-            },
-            CoreError::TargetIdentityChanged {
-                path: "target".into(),
-            },
-            CoreError::TargetReparsePoint {
-                path: "target".into(),
-            },
-            CoreError::SecureOperationUnsupported {
-                path: "target".into(),
-                operation: "delete".into(),
-                source: io_error(),
-            },
-            CoreError::SecureTargetOpenFailed {
-                path: "target".into(),
-                source: io_error(),
-            },
-            CoreError::SecureEnumerationFailed {
-                path: "target".into(),
-                source: io_error(),
-            },
-            CoreError::SecureHandleQueryFailed {
-                path: "target".into(),
-                operation: "query",
-                source: io_error(),
-            },
-            CoreError::SecureDeletionFailed {
-                path: "target".into(),
-                source: io_error(),
-            },
-            CoreError::SecureTrashUnavailable,
-        ];
-
-        for error in errors {
+        for error in every_error() {
             let display = error.to_string();
             let json = serde_json::to_value(error.public_info()).unwrap();
             let object = json.as_object().unwrap();
@@ -567,6 +586,7 @@ mod tests {
             assert_eq!(round_trip, json);
             assert!(!json.to_string().contains("source"));
             assert!(!json.to_string().contains("private-native-detail-7f3c"));
+            assert!(!json.to_string().contains("private-workspace-detail"));
             assert!(!json.to_string().contains("Permission denied"));
 
             if matches!(
@@ -584,7 +604,6 @@ mod tests {
         let error = CoreError::Io(io_error());
         let display_before = error.to_string();
         let source_before = error.source().unwrap().to_string();
-        assert!(error.source().is_some());
 
         let info = error.public_info();
 
@@ -650,6 +669,26 @@ mod tests {
     }
 
     #[test]
+    fn limit_errors_display_their_bound() {
+        assert_eq!(
+            CoreError::SecureTargetTooLarge {
+                path: "target".into(),
+                limit: 500_000,
+            }
+            .to_string(),
+            "secure target exceeds 500000 entries: target"
+        );
+        assert_eq!(
+            CoreError::SecureTargetTooDeep {
+                path: "target".into(),
+                limit: 512,
+            }
+            .to_string(),
+            "secure target exceeds 512 directory levels: target"
+        );
+    }
+
+    #[test]
     fn core_error_info_serializes_as_public_contract() {
         let info = CoreErrorInfo {
             code: CoreErrorCode::SecureOperationUnsupported,
@@ -668,7 +707,4 @@ mod tests {
             })
         );
     }
-
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStringExt;
 }

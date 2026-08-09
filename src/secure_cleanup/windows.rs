@@ -1,3 +1,4 @@
+use super::CleanupIntent;
 use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 #[cfg(test)]
@@ -38,6 +39,14 @@ const IID_IFILE_OPERATION: GUID = GUID::from_u128(0x947aab5f_0a5c_4c13_b4d6_4bf7
 const IID_IFILE_OPERATION_PROGRESS_SINK: GUID =
     GUID::from_u128(0x04b0f1a7_9490_44bc_96e1_4296a31252e2);
 const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
+
+/// Directory nesting a secure open accepts. Deeper trees are refused instead of
+/// walked, so a pathological layout cannot exhaust memory during collection.
+const MAX_SECURE_TREE_DEPTH: usize = 512;
+/// Handles retained at once by a single secure open. The whole subtree is opened
+/// and verified before any deletion, so this caps kernel handle consumption and
+/// fails closed instead of exhausting the process handle table.
+const MAX_SECURE_TREE_ENTRIES: usize = 500_000;
 
 #[cfg(test)]
 type ShellItemBoundaryHook = Box<dyn FnOnce() + Send>;
@@ -514,6 +523,12 @@ impl Drop for ComApartment {
 #[derive(Debug)]
 struct Handle(HANDLE);
 
+// SAFETY: a file `HANDLE` is a process-wide kernel value with no thread
+// affinity, and `Handle` owns it exclusively, so moving one between threads
+// cannot alias or invalidate it. Only COM interfaces are apartment-bound, and
+// none are represented by this type.
+unsafe impl Send for Handle {}
+
 impl Drop for Handle {
     fn drop(&mut self) {
         // SAFETY: Handle owns a successful CreateFileW result.
@@ -529,9 +544,11 @@ struct Entry {
     path: PathBuf,
 }
 
+/// Ancestors are held open only so their handles keep the path pinned while the
+/// target is verified; nothing reads the handle back.
 #[derive(Debug)]
 struct Ancestor {
-    handle: Handle,
+    _handle: Handle,
     identity: FileIdentity,
     path: PathBuf,
 }
@@ -556,17 +573,27 @@ struct ShellTrashInput {
 pub(super) struct WindowsTarget {
     _ancestors: Vec<Ancestor>,
     entries: Vec<Entry>,
+    intent: CleanupIntent,
 }
 
 impl WindowsTarget {
-    pub(super) fn capabilities(&self) -> super::CleanupCapabilities {
-        super::CleanupCapabilities {
-            permanent: true,
-            trash: shell_backend_available(),
-        }
-    }
-
     pub(super) fn delete_permanently(mut self) -> CoreResult<()> {
+        if self.intent != CleanupIntent::Permanent {
+            // A Trash-opened target holds no descendant handles, so it cannot
+            // delete a tree. Refuse instead of half-deleting one.
+            return Err(CoreError::SecureOperationUnsupported {
+                path: self
+                    .entries
+                    .first()
+                    .map(|entry| entry.path.clone())
+                    .unwrap_or_default(),
+                operation: "permanent cleanup".to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "secure target was opened for Trash cleanup",
+                ),
+            });
+        }
         for entry in self.entries.drain(..).rev() {
             let info = FILE_DISPOSITION_INFO_EX {
                 Flags: FILE_DISPOSITION_FLAG_DELETE
@@ -596,6 +623,7 @@ impl WindowsTarget {
         let WindowsTarget {
             entries,
             _ancestors: ancestors,
+            ..
         } = self;
         // open_secure_target asserts this invariant: target entry is always first and the
         // collection is never empty. An empty collection is an internal construction bug, not
@@ -845,7 +873,7 @@ fn map_trash_error(path: &Path, operation: &str, result: HRESULT) -> CoreError {
 }
 
 fn revalidate_shell_target(path: &Path, expected: FileIdentity) -> CoreResult<()> {
-    let entry = open_entry(path, path)?;
+    let entry = open_entry(path, path, AccessProfile::Inspect)?;
     if entry.identity != expected {
         return Err(CoreError::TargetIdentityChanged {
             path: path.to_path_buf(),
@@ -860,7 +888,7 @@ fn revalidate_shell_ancestor(ancestor: &AncestorSnapshot, target: &Path) -> Core
             path: target.to_path_buf(),
         });
     }
-    let entry = open_directory(&ancestor.path, &ancestor.path)?;
+    let entry = open_directory(&ancestor.path, &ancestor.path, AccessProfile::Inspect)?;
     if entry.identity != ancestor.identity {
         return Err(CoreError::TargetIdentityChanged {
             path: ancestor.path.clone(),
@@ -886,7 +914,7 @@ fn verify_shell_target_absent(
         Err(_) => Err(CoreError::SecureTrashPostconditionFailed {
             path: path.to_path_buf(),
         }),
-        Ok(_) => match open_entry(path, path) {
+        Ok(_) => match open_entry(path, path, AccessProfile::Inspect) {
             Ok(entry) if entry.identity != expected => {
                 Err(CoreError::SecureTrashPostconditionFailed {
                     path: path.to_path_buf(),
@@ -899,7 +927,11 @@ fn verify_shell_target_absent(
     }
 }
 
-pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult<WindowsTarget> {
+pub(super) fn open_secure_target(
+    root: &Path,
+    target: &ScanTarget,
+    intent: CleanupIntent,
+) -> CoreResult<WindowsTarget> {
     let expected = target
         .identity
         .ok_or_else(|| CoreError::TargetIdentityUnavailable {
@@ -916,9 +948,9 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
 
     let mut ancestors = Vec::new();
     let mut current = root.to_path_buf();
-    let root_entry = open_directory(root, &target.path)?;
+    let root_entry = open_directory(root, root, AccessProfile::Inspect)?;
     ancestors.push(Ancestor {
-        handle: root_entry.handle,
+        _handle: root_entry.handle,
         identity: root_entry.identity,
         path: root_entry.path,
     });
@@ -930,16 +962,20 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
             ));
         };
         current.push(name);
-        let entry = open_directory(&current, &target.path)?;
+        let entry = open_directory(&current, &current, AccessProfile::Inspect)?;
         ancestors.push(Ancestor {
-            handle: entry.handle,
+            _handle: entry.handle,
             identity: entry.identity,
             path: entry.path,
         });
     }
 
     let target_path = current.join(basename);
-    let target_entry = open_entry(&target_path, &target.path)?;
+    let target_access = match intent {
+        CleanupIntent::Permanent => AccessProfile::Delete,
+        CleanupIntent::Trash => AccessProfile::Inspect,
+    };
+    let target_entry = open_entry(&target_path, &target.path, target_access)?;
     if !target_entry.is_directory {
         return Err(open_error(
             target,
@@ -953,33 +989,138 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
     }
 
     let mut entries = Vec::new();
-    collect_entries(target_entry, &mut entries)?;
+    match intent {
+        // Permanent cleanup deletes through the retained handles, so every entry
+        // has to be opened and verified before anything is mutated.
+        CleanupIntent::Permanent => collect_entries(target_entry, &mut entries)?,
+        // Trash cleanup hands a path to the Shell and releases every handle
+        // first, so descendant handles would be opened, held and dropped without
+        // ever guarding the operation. Only the target and its ancestors are
+        // pinned; the Shell moves the target as a single item and does not
+        // traverse reparse points inside it.
+        CleanupIntent::Trash => entries.push(target_entry),
+    }
     assert!(
         !entries.is_empty(),
-        "collect_entries must retain verified target entry"
+        "secure open must retain the verified target entry"
     );
     Ok(WindowsTarget {
         _ancestors: ancestors,
         entries,
+        intent,
     })
 }
 
-fn collect_entries(entry: Entry, entries: &mut Vec<Entry>) -> CoreResult<()> {
-    if entry.is_directory {
-        let children =
-            enumerate_directory(entry.handle.0, &entry.path, entry.identity.volume_serial)?;
-        entries.push(entry);
-        for child in children {
-            collect_entries(child, entries)?;
+/// A directory handle being handed to a worker thread. `HANDLE` is a plain
+/// kernel handle value with no thread affinity: it is valid process-wide, and
+/// the owning `Entry` outlives the expansion that borrows it.
+#[derive(Clone, Copy)]
+struct DirectoryToExpand {
+    handle: HANDLE,
+    volume_serial: u64,
+}
+
+// SAFETY: file handles carry no thread affinity; only COM interfaces do, and
+// none cross this boundary. Ownership stays with the `Entry` on the main thread.
+unsafe impl Send for DirectoryToExpand {}
+unsafe impl Sync for DirectoryToExpand {}
+
+/// Collects the target subtree level by level, expanding every directory of a
+/// level in parallel. Two invariants matter and both survive the parallelism:
+/// entries stay in an order where a parent precedes its descendants, which is
+/// what `delete_permanently` relies on when it drains the collection in reverse;
+/// and the result is deterministic, because each level is appended in frontier
+/// order rather than completion order. Iterative, so nesting cannot exhaust the
+/// stack.
+fn collect_entries(root: Entry, entries: &mut Vec<Entry>) -> CoreResult<()> {
+    let mut frontier = Vec::new();
+    push_entry(root, entries, &mut frontier, 0)?;
+
+    let mut depth = 0;
+    while !frontier.is_empty() {
+        depth += 1;
+        let level = expand_level(&frontier)?;
+        frontier.clear();
+        for children in level {
+            for child in children {
+                push_entry(child, entries, &mut frontier, depth)?;
+            }
         }
-    } else {
-        entries.push(entry);
     }
     Ok(())
 }
 
-fn open_directory(path: &Path, display: &Path) -> CoreResult<Entry> {
-    let entry = open_entry(path, display)?;
+/// Enumerates one level. Falls back to sequential enumeration when no worker
+/// pool is available, so behaviour never depends on pool construction.
+fn expand_level(frontier: &[(DirectoryToExpand, PathBuf)]) -> CoreResult<Vec<Vec<Entry>>> {
+    let enumerate = |(directory, path): &(DirectoryToExpand, PathBuf)| {
+        enumerate_directory(directory.handle, path, directory.volume_serial)
+    };
+
+    let results: Vec<CoreResult<Vec<Entry>>> = match crate::parallel::worker_pool() {
+        Some(pool) => pool.install(|| {
+            use jwalk::rayon::prelude::*;
+            frontier.par_iter().map(enumerate).collect()
+        }),
+        None => frontier.iter().map(enumerate).collect(),
+    };
+
+    // Report the first failure in frontier order, not in completion order, so a
+    // failing tree always produces the same error.
+    results.into_iter().collect()
+}
+
+fn push_entry(
+    entry: Entry,
+    entries: &mut Vec<Entry>,
+    frontier: &mut Vec<(DirectoryToExpand, PathBuf)>,
+    depth: usize,
+) -> CoreResult<()> {
+    if entries.len() >= MAX_SECURE_TREE_ENTRIES {
+        return Err(CoreError::SecureTargetTooLarge {
+            path: entry.path,
+            limit: MAX_SECURE_TREE_ENTRIES,
+        });
+    }
+    if entry.is_directory {
+        if depth >= MAX_SECURE_TREE_DEPTH {
+            return Err(CoreError::SecureTargetTooDeep {
+                path: entry.path,
+                limit: MAX_SECURE_TREE_DEPTH,
+            });
+        }
+        frontier.push((
+            DirectoryToExpand {
+                handle: entry.handle.0,
+                volume_serial: entry.identity.volume_serial,
+            },
+            entry.path.clone(),
+        ));
+    }
+    entries.push(entry);
+    Ok(())
+}
+
+/// How much access a secure open needs from an entry.
+///
+/// Requesting `DELETE` makes the open fail with a sharing violation whenever any
+/// other process holds the entry open without delete sharing — a directory that
+/// is some process's working directory, an editor, a running build. That price
+/// is unavoidable where the handle is the deletion mechanism, and pointless
+/// everywhere else, so it is only paid where it buys something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessProfile {
+    /// The handle will delete the entry: needs `DELETE`, and enumeration rights
+    /// for directories so the subtree can be walked.
+    Delete,
+    /// The handle only pins the entry and reads its identity. Attribute access
+    /// is exempt from share-mode conflicts, so this succeeds on entries other
+    /// processes are using.
+    Inspect,
+}
+
+fn open_directory(path: &Path, display: &Path, access: AccessProfile) -> CoreResult<Entry> {
+    let entry = open_entry(path, display, access)?;
     if !entry.is_directory {
         return Err(open_error_path(
             display,
@@ -989,7 +1130,7 @@ fn open_directory(path: &Path, display: &Path) -> CoreResult<Entry> {
     Ok(entry)
 }
 
-fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
+fn open_entry(path: &Path, display: &Path, access: AccessProfile) -> CoreResult<Entry> {
     let wide = wide_path(path);
     let open = |access| {
         // SAFETY: wide is NUL-terminated; all other arguments are fixed valid flags.
@@ -1007,6 +1148,20 @@ fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
             )
         }
     };
+
+    if access == AccessProfile::Inspect {
+        let handle = open(FILE_READ_ATTRIBUTES);
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(CoreError::SecureTargetOpenFailed {
+                path: display.to_path_buf(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        // Nothing enumerates through an inspect handle, so there is no
+        // enumeration requirement to enforce.
+        return open_entry_with_handle(handle, path, display, true, None);
+    }
+
     // FILE_LIST_DIRECTORY is required for directory enumeration but is not a
     // valid desired access for every regular-file provider.
     let handle = open(DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY);
@@ -1022,34 +1177,6 @@ fn open_entry(path: &Path, display: &Path) -> CoreResult<Entry> {
         path: display.to_path_buf(),
         source: std::io::Error::last_os_error(),
     })
-}
-
-fn open_entry_with_access(
-    path: &Path,
-    display: &Path,
-    access: u32,
-    can_enumerate: bool,
-) -> CoreResult<Entry> {
-    let wide = wide_path(path);
-    // SAFETY: wide is NUL-terminated; all other arguments are fixed valid flags.
-    let handle = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_POSIX_SEMANTICS,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(CoreError::SecureTargetOpenFailed {
-            path: display.to_path_buf(),
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    open_entry_with_handle(handle, path, display, can_enumerate, None)
 }
 
 fn open_entry_with_handle(
@@ -1168,7 +1295,7 @@ fn enumerate_directory(
             if name != [46] && name != [46, 46] {
                 let name = os_string_from_wide(name);
                 let path = display.join(&name);
-                let entry = open_entry(&path, &path)?;
+                let entry = open_entry(&path, &path, AccessProfile::Delete)?;
                 let enumerated = FileIdentity {
                     volume_serial,
                     file_id: record.file_id,
@@ -1365,14 +1492,15 @@ fn open_error_path_with_source(
 mod tests {
     use super::{
         classify_trash_progress, identity_matches, map_aborted_operations, map_disposition_error,
-        map_trash_error, open_entry_with_access, open_error_path_with_source, open_secure_target,
-        os_string_from_wide, parse_directory_records, progress_sink_add_ref, progress_sink_release,
+        map_trash_error, open_error_path_with_source, open_secure_target, os_string_from_wide,
+        parse_directory_records, progress_sink_add_ref, progress_sink_release,
         revalidate_shell_ancestor, revalidate_shell_target, shell_wide_path,
         verify_shell_target_absent, AncestorSnapshot, ProgressSink, TrashProgressEvidence,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
     use crate::model::{Category, ScanTarget};
+    use crate::secure_cleanup::CleanupIntent;
     use std::ffi::OsString;
     use std::fs;
     use std::mem::offset_of;
@@ -1638,6 +1766,40 @@ mod tests {
         unsafe { std::ptr::write_unaligned(buffer.as_mut_ptr().add(offset).cast(), value) };
     }
 
+    /// Test-only probe: production always requests enumeration access first and
+    /// falls back inside `open_entry`.
+    fn open_entry_with_access(
+        path: &std::path::Path,
+        display: &std::path::Path,
+        access: u32,
+        can_enumerate: bool,
+    ) -> crate::error::CoreResult<super::Entry> {
+        let wide = super::wide_path(path);
+        // SAFETY: wide is NUL-terminated; all other arguments are fixed valid flags.
+        let handle = unsafe {
+            windows_sys::Win32::Storage::FileSystem::CreateFileW(
+                wide.as_ptr(),
+                access,
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+                std::ptr::null(),
+                windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING,
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS
+                    | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT
+                    | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_POSIX_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return Err(CoreError::SecureTargetOpenFailed {
+                path: display.to_path_buf(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        super::open_entry_with_handle(handle, path, display, can_enumerate, None)
+    }
+
     #[test]
     fn directory_opened_without_enumeration_access_is_rejected() {
         let fixture = Fixture::new("directory-access");
@@ -1681,12 +1843,11 @@ mod tests {
         fs::write(target_path.join("child.txt"), b"data").unwrap();
         let target = ScanTarget::new(target_path, Category::NodeModules, 0)
             .with_identity(file_identity(&fixture.root.join("target")));
-        let secure = open_secure_target(&fixture.root, &target).unwrap();
-        assert!(secure.capabilities().permanent);
-        assert_eq!(
-            secure.capabilities().trash,
-            super::shell_backend_available()
-        );
+        open_secure_target(&fixture.root, &target, CleanupIntent::Permanent)
+            .expect("verified target should open");
+        let capabilities = crate::cleanup_capabilities();
+        assert!(capabilities.permanent_cleanup);
+        assert_eq!(capabilities.move_to_trash, super::shell_backend_available());
     }
 
     #[test]
@@ -1697,10 +1858,12 @@ mod tests {
         fs::write(target_path.join("child.txt"), b"data").unwrap();
         let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
             .with_identity(file_identity(&target_path));
-        let secure = open_secure_target(&fixture.root, &target).unwrap();
+        let secure = open_secure_target(&fixture.root, &target, CleanupIntent::Trash).unwrap();
 
-        let probe = super::shell_backend_available();
-        assert_eq!(secure.capabilities().trash, probe);
+        assert_eq!(
+            crate::cleanup_capabilities().move_to_trash,
+            super::shell_backend_available()
+        );
         match secure.move_to_trash() {
             Ok(()) => assert!(!target_path.exists()),
             Err(error) => {
@@ -1726,7 +1889,7 @@ mod tests {
         fs::write(target_path.join("original.txt"), b"original").unwrap();
         let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
             .with_identity(file_identity(&target_path));
-        let secure = open_secure_target(&fixture.root, &target).unwrap();
+        let secure = open_secure_target(&fixture.root, &target, CleanupIntent::Trash).unwrap();
 
         super::force_next_trash_abort();
         let result = secure.move_to_trash();
@@ -1754,7 +1917,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            open_secure_target(&fixture.root, &target),
+            open_secure_target(&fixture.root, &target, CleanupIntent::Permanent),
             Err(CoreError::TargetIdentityChanged { .. })
         ));
         let identity = file_identity(&original);
@@ -1762,7 +1925,7 @@ mod tests {
         fs::create_dir(&original).unwrap();
         let replaced = ScanTarget::new(original, Category::NodeModules, 0).with_identity(identity);
         assert!(matches!(
-            open_secure_target(&fixture.root, &replaced),
+            open_secure_target(&fixture.root, &replaced, CleanupIntent::Permanent),
             Err(CoreError::TargetIdentityChanged { .. })
         ));
     }
@@ -1780,7 +1943,7 @@ mod tests {
         let direct = ScanTarget::new(fixture.root.join("direct"), Category::NodeModules, 0)
             .with_identity(file_identity(&fixture.root.join("real")));
         assert!(matches!(
-            open_secure_target(&fixture.root, &direct),
+            open_secure_target(&fixture.root, &direct, CleanupIntent::Permanent),
             Err(CoreError::TargetReparsePoint { .. })
         ));
         fs::create_dir(fixture.root.join("real").join("target")).unwrap();
@@ -1798,7 +1961,7 @@ mod tests {
         )
         .with_identity(file_identity(&fixture.root.join("real").join("target")));
         assert!(matches!(
-            open_secure_target(&fixture.root, &ancestor),
+            open_secure_target(&fixture.root, &ancestor, CleanupIntent::Permanent),
             Err(CoreError::TargetReparsePoint { .. })
         ));
     }
@@ -1813,7 +1976,8 @@ mod tests {
         fs::create_dir(&ancestor).unwrap();
         fs::create_dir(&target).unwrap();
 
-        let opened = super::open_directory(&ancestor, &target).unwrap();
+        let opened =
+            super::open_directory(&ancestor, &target, super::AccessProfile::Inspect).unwrap();
         let snapshot = AncestorSnapshot {
             identity: opened.identity,
             path: opened.path.clone(),
@@ -1894,7 +2058,8 @@ mod tests {
         let target = ancestor.join("target");
         fs::create_dir(&ancestor).unwrap();
         fs::create_dir(&target).unwrap();
-        let opened = super::open_directory(&ancestor, &target).unwrap();
+        let opened =
+            super::open_directory(&ancestor, &target, super::AccessProfile::Inspect).unwrap();
         let snapshot = AncestorSnapshot {
             identity: opened.identity,
             path: opened.path.clone(),
@@ -1911,6 +2076,83 @@ mod tests {
     }
 
     #[test]
+    fn trash_open_succeeds_while_another_handle_denies_delete_sharing() {
+        // Reproduces a directory another process is using: a build directory, an
+        // editor, or a process whose working directory it is. Trash cleanup only
+        // pins the target, so it must not fail; permanent cleanup needs DELETE
+        // and is expected to report the sharing violation.
+        let fixture = Fixture::new("sharing-violation");
+        let target_path = fixture.root.join("target");
+        fs::create_dir(&target_path).unwrap();
+        fs::write(target_path.join("child.txt"), b"data").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(file_identity(&target_path));
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = target_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: wide is NUL-terminated and the flags are documented values.
+        let blocking = unsafe {
+            windows_sys::Win32::Storage::FileSystem::CreateFileW(
+                wide.as_ptr(),
+                // Mirrors how a process holds its working directory: read and
+                // list access, shared for read and write but never for delete.
+                windows_sys::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY
+                    | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+                std::ptr::null(),
+                windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING,
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            blocking,
+            windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+            "test must hold a handle that denies delete sharing"
+        );
+
+        let trash = open_secure_target(&fixture.root, &target, CleanupIntent::Trash);
+        let permanent = open_secure_target(&fixture.root, &target, CleanupIntent::Permanent);
+
+        // SAFETY: the handle came from a successful CreateFileW above.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(blocking) };
+
+        assert!(trash.is_ok(), "unexpected Trash open failure: {trash:?}");
+        match permanent {
+            Err(CoreError::SecureTargetOpenFailed { source, .. }) => {
+                assert_eq!(source.raw_os_error(), Some(32));
+            }
+            other => panic!("permanent open must report the sharing violation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permanent_cleanup_removes_a_nested_tree_in_child_before_parent_order() {
+        let fixture = Fixture::new("nested-delete");
+        let target_path = fixture.root.join("target");
+        let deep = target_path.join("a").join("b").join("c");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf.txt"), b"leaf").unwrap();
+        for sibling in 0..8 {
+            let branch = target_path.join(format!("branch-{sibling}"));
+            fs::create_dir_all(branch.join("nested")).unwrap();
+            fs::write(branch.join("nested").join("file.txt"), b"data").unwrap();
+            fs::write(branch.join("root.txt"), b"data").unwrap();
+        }
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
+            .with_identity(file_identity(&target_path));
+
+        let secure = open_secure_target(&fixture.root, &target, CleanupIntent::Permanent).unwrap();
+        secure.delete_permanently().unwrap();
+
+        assert!(!target_path.exists());
+    }
+
+    #[test]
     fn permanent_cleanup_removes_verified_tree_through_retained_handles() {
         let fixture = Fixture::new("handle-delete");
         let target_path = fixture.root.join("target");
@@ -1918,7 +2160,7 @@ mod tests {
         fs::write(target_path.join("original.txt"), b"original").unwrap();
         let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
             .with_identity(file_identity(&target_path));
-        let secure = open_secure_target(&fixture.root, &target).unwrap();
+        let secure = open_secure_target(&fixture.root, &target, CleanupIntent::Permanent).unwrap();
         secure.delete_permanently().unwrap();
         assert!(!target_path.exists());
     }
@@ -1932,7 +2174,7 @@ mod tests {
         fs::write(target_path.join("original.txt"), b"original-content").unwrap();
         let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 0)
             .with_identity(file_identity(&target_path));
-        let secure = open_secure_target(&fixture.root, &target).unwrap();
+        let secure = open_secure_target(&fixture.root, &target, CleanupIntent::Permanent).unwrap();
 
         let replacement_attempt = fs::rename(&target_path, &archived_path).unwrap_err();
         assert_eq!(replacement_attempt.raw_os_error(), Some(5));
@@ -1956,8 +2198,6 @@ mod tests {
         let secure = super::super::SecureTarget {
             backend: super::super::BackendTarget::Unsupported,
         };
-        assert!(!secure.capabilities().permanent);
-        assert!(!secure.capabilities().trash);
         assert!(matches!(
             secure.delete_permanently(),
             Err(CoreError::SecureOperationUnsupported { .. })

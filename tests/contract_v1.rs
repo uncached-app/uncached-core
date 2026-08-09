@@ -291,6 +291,7 @@ fn settled_scan_and_cleanup_dtos_have_stable_fields() {
         success: true,
         target_path: r"C:\workspace\target".into(),
         freed_bytes: 42,
+        size_pending: false,
         size_has_errors: false,
     })
     .unwrap();
@@ -300,6 +301,7 @@ fn settled_scan_and_cleanup_dtos_have_stable_fields() {
             "success": true,
             "targetPath": r"C:\workspace\target",
             "freedBytes": 42,
+            "sizePending": false,
             "sizeHasErrors": false
         })
     );
@@ -326,9 +328,7 @@ fn platform_and_capabilities_serialize_as_contract_values() {
 fn public_capabilities_reflect_current_secure_backend() {
     let capabilities = uncached_core::cleanup_capabilities();
 
-    let secure_identity_supported = cfg!(windows)
-        || cfg!(any(target_os = "linux", target_os = "android"))
-        || cfg!(target_os = "macos");
+    let secure_identity_supported = cfg!(any(unix, windows));
 
     assert_eq!(capabilities.secure_identity, secure_identity_supported);
     assert_eq!(capabilities.permanent_cleanup, cfg!(windows));
@@ -351,10 +351,26 @@ fn public_capabilities_reflect_current_secure_backend() {
 fn every_core_error_code_is_a_stable_snake_case_string() {
     let cases = [
         (CoreErrorCode::InvalidWorkspace, "invalid_workspace"),
-        (CoreErrorCode::InvalidTarget, "invalid_target"),
         (CoreErrorCode::Io, "io"),
-        (CoreErrorCode::Trash, "trash"),
-        (CoreErrorCode::RecycleBinTooLarge, "recycle_bin_too_large"),
+        (CoreErrorCode::ProviderUnavailable, "provider_unavailable"),
+        (CoreErrorCode::TargetMissing, "target_missing"),
+        (CoreErrorCode::TargetNotDirectory, "target_not_directory"),
+        (
+            CoreErrorCode::TargetNameUnsupported,
+            "target_name_unsupported",
+        ),
+        (
+            CoreErrorCode::TargetProviderMismatch,
+            "target_provider_mismatch",
+        ),
+        (
+            CoreErrorCode::TargetContextInvalid,
+            "target_context_invalid",
+        ),
+        (
+            CoreErrorCode::TargetOutsideWorkspace,
+            "target_outside_workspace",
+        ),
         (
             CoreErrorCode::TargetIdentityUnavailable,
             "target_identity_unavailable",
@@ -372,6 +388,11 @@ fn every_core_error_code_is_a_stable_snake_case_string() {
             CoreErrorCode::SecureTargetOpenFailed,
             "secure_target_open_failed",
         ),
+        (
+            CoreErrorCode::SecureTargetTooLarge,
+            "secure_target_too_large",
+        ),
+        (CoreErrorCode::SecureTargetTooDeep, "secure_target_too_deep"),
         (
             CoreErrorCode::SecureEnumerationFailed,
             "secure_enumeration_failed",
@@ -405,7 +426,12 @@ fn every_core_error_code_is_a_stable_snake_case_string() {
 
     for (code, expected) in cases {
         assert_eq!(serde_json::to_value(code).unwrap(), json!(expected));
+        assert_eq!(
+            serde_json::from_value::<CoreErrorCode>(json!(expected)).unwrap(),
+            code
+        );
     }
+    assert!(serde_json::from_value::<CoreErrorCode>(json!("invalid_target")).is_err());
 }
 
 #[test]
@@ -413,10 +439,26 @@ fn every_public_error_preserves_contract_shape_without_native_details() {
     let native_detail = "private-native-detail";
     let errors = [
         CoreError::InvalidWorkspace(native_detail.into()),
-        CoreError::InvalidTarget(native_detail.into()),
         CoreError::Io(std::io::Error::other(native_detail)),
-        CoreError::Trash(native_detail.into()),
-        CoreError::RecycleBinTooLarge,
+        CoreError::ProviderUnavailable,
+        CoreError::TargetMissing {
+            path: "target".into(),
+        },
+        CoreError::TargetNotDirectory {
+            path: "target".into(),
+        },
+        CoreError::TargetNameUnsupported {
+            path: "target".into(),
+        },
+        CoreError::TargetProviderMismatch {
+            path: "target".into(),
+        },
+        CoreError::TargetContextInvalid {
+            path: "target".into(),
+        },
+        CoreError::TargetOutsideWorkspace {
+            path: "target".into(),
+        },
         CoreError::TargetIdentityUnavailable {
             path: "target".into(),
         },
@@ -434,6 +476,14 @@ fn every_public_error_preserves_contract_shape_without_native_details() {
         CoreError::SecureTargetOpenFailed {
             path: "target".into(),
             source: std::io::Error::other(native_detail),
+        },
+        CoreError::SecureTargetTooLarge {
+            path: "target".into(),
+            limit: 500_000,
+        },
+        CoreError::SecureTargetTooDeep {
+            path: "target".into(),
+            limit: 512,
         },
         CoreError::SecureEnumerationFailed {
             path: "target".into(),
@@ -550,12 +600,7 @@ fn typed_trash_errors_have_stable_sanitized_contract_fields() {
     }
 }
 
-#[cfg(not(any(
-    windows,
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos"
-)))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn unsupported_platform_capabilities_are_fail_closed() {
     assert_eq!(

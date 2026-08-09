@@ -69,3 +69,29 @@ Sizing is a Desktop lifecycle concern rather than part of this core benchmark:
 Desktop caps sizing workers at 8, uses a bounded queue, and reports completion
 only after all sizing jobs settle. A sizing error settles visibly on its target;
 it does not silently become a successful size or permit cleanup.
+
+## Secure Open
+
+Cleanup on Windows opens the target before mutating anything. What gets opened
+depends on the cleanup mode, and that dominates the wall-clock cost of a cleanup.
+
+Permanent cleanup deletes through retained handles, so it must open every entry
+in the subtree. Trash cleanup hands a path to the Shell and releases every handle
+before that call, so descendant handles could never guard the operation; it opens
+only the target and its ancestors.
+
+Measured on `x86_64-pc-windows-msvc` with a synthetic target of 10,000 files in
+400 directories, timing only the open phase. Host-specific observations, not
+general performance claims:
+
+```text
+permanent, sequential collection: 497.7 ms
+permanent, parallel collection:   124.9 ms
+trash:                              0.15 ms
+```
+
+Parallel collection expands one directory level at a time across the shared
+worker pool. Entries are appended in frontier order rather than completion order,
+so the collection stays deterministic and a parent always precedes its
+descendants — the invariant permanent deletion relies on when it drains the
+collection in reverse.

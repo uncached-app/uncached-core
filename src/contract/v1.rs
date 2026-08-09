@@ -32,37 +32,6 @@ impl<'de> Deserialize<'de> for CoreErrorInfo {
     }
 }
 
-impl<'de> Deserialize<'de> for crate::error::CoreErrorCode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        match String::deserialize(deserializer)?.as_str() {
-            "invalid_workspace" => Ok(Self::InvalidWorkspace),
-            "invalid_target" => Ok(Self::InvalidTarget),
-            "io" => Ok(Self::Io),
-            "trash" => Ok(Self::Trash),
-            "recycle_bin_too_large" => Ok(Self::RecycleBinTooLarge),
-            "target_identity_unavailable" => Ok(Self::TargetIdentityUnavailable),
-            "target_identity_changed" => Ok(Self::TargetIdentityChanged),
-            "target_reparse_point" => Ok(Self::TargetReparsePoint),
-            "secure_operation_unsupported" => Ok(Self::SecureOperationUnsupported),
-            "secure_target_open_failed" => Ok(Self::SecureTargetOpenFailed),
-            "secure_enumeration_failed" => Ok(Self::SecureEnumerationFailed),
-            "secure_handle_query_failed" => Ok(Self::SecureHandleQueryFailed),
-            "secure_deletion_failed" => Ok(Self::SecureDeletionFailed),
-            "secure_trash_unavailable" => Ok(Self::SecureTrashUnavailable),
-            "secure_trash_initialization_failed" => Ok(Self::SecureTrashInitializationFailed),
-            "secure_trash_operation_failed" => Ok(Self::SecureTrashOperationFailed),
-            "secure_trash_aborted" => Ok(Self::SecureTrashAborted),
-            "secure_trash_postcondition_failed" => Ok(Self::SecureTrashPostconditionFailed),
-            value => Err(serde::de::Error::custom(format!(
-                "unknown error code: {value}"
-            ))),
-        }
-    }
-}
-
 pub const API_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +214,7 @@ pub struct CleanupResultDto {
     pub success: bool,
     pub target_path: String,
     pub freed_bytes: u64,
+    pub size_pending: bool,
     pub size_has_errors: bool,
 }
 
@@ -254,6 +224,7 @@ impl From<(String, CleanReport)> for CleanupResultDto {
             success: true,
             target_path,
             freed_bytes: report.freed_bytes,
+            size_pending: report.size_pending,
             size_has_errors: report.size_has_errors,
         }
     }

@@ -1,24 +1,25 @@
 use crate::error::{CoreError, CoreResult};
 use crate::model::ScanTarget;
-use crate::scanner::ProviderSet;
 use std::path::Path;
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-mod unix;
 #[cfg(windows)]
 mod windows;
 #[cfg(all(test, windows))]
 pub(crate) use windows::install_shell_item_boundary_hook;
 
-pub(crate) const NON_MACOS_UNIX_FD_BACKEND_SUPPORTED: bool =
-    cfg!(any(target_os = "linux", target_os = "android"));
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CleanupCapabilities {
-    pub permanent: bool,
-    pub trash: bool,
+pub(crate) struct CleanupCapabilities {
+    pub(crate) permanent: bool,
+    pub(crate) trash: bool,
+}
+
+/// The cleanup a caller intends to perform. Capabilities are checked against it
+/// before any filesystem work happens, so an unsupported platform refuses
+/// without opening handles for the target tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupIntent {
+    Permanent,
+    Trash,
 }
 
 pub(crate) fn cleanup_capabilities() -> crate::contract::v1::CleanupCapabilities {
@@ -26,47 +27,37 @@ pub(crate) fn cleanup_capabilities() -> crate::contract::v1::CleanupCapabilities
     crate::contract::v1::CleanupCapabilities {
         permanent_cleanup: capabilities.permanent,
         move_to_trash: capabilities.trash,
-        secure_identity: cfg!(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            windows
-        )),
+        secure_identity: cfg!(any(unix, windows)),
     }
 }
 
 fn backend_capabilities() -> CleanupCapabilities {
     #[cfg(windows)]
     {
-        return CleanupCapabilities {
+        CleanupCapabilities {
             permanent: true,
             trash: windows::shell_backend_available(),
-        };
+        }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    // No non-Windows backend performs identity-preserving deletion yet, so every
+    // other platform reports both capabilities as unavailable.
+    #[cfg(not(windows))]
     {
-        return CleanupCapabilities {
+        CleanupCapabilities {
             permanent: false,
             trash: false,
-        };
-    }
-
-    #[allow(unreachable_code)]
-    CleanupCapabilities {
-        permanent: false,
-        trash: false,
+        }
     }
 }
 
 #[derive(Debug)]
 enum BackendTarget {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    Unix(unix::UnixTarget),
-    #[cfg(target_os = "macos")]
-    Macos(macos::MacosTarget),
     #[cfg(windows)]
     Windows(windows::WindowsTarget),
+    /// Constructed on platforms without a secure backend, and by the tests that
+    /// pin the unsupported-platform contract on every platform.
+    #[cfg_attr(windows, allow(dead_code))]
     Unsupported,
 }
 
@@ -75,46 +66,16 @@ pub(crate) struct SecureTarget {
 }
 
 impl SecureTarget {
-    pub(crate) fn capabilities(&self) -> CleanupCapabilities {
-        match &self.backend {
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            BackendTarget::Unix(target) => target.capabilities(),
-            #[cfg(target_os = "macos")]
-            BackendTarget::Macos(target) => target.capabilities(),
-            #[cfg(windows)]
-            BackendTarget::Windows(target) => target.capabilities(),
-            BackendTarget::Unsupported => CleanupCapabilities {
-                permanent: false,
-                trash: false,
-            },
-        }
-    }
-
     pub(crate) fn delete_permanently(self) -> CoreResult<()> {
         match self.backend {
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            BackendTarget::Unix(target) => target.delete_permanently(),
-            #[cfg(target_os = "macos")]
-            BackendTarget::Macos(target) => target.delete_permanently(),
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.delete_permanently(),
-            BackendTarget::Unsupported => Err(CoreError::SecureOperationUnsupported {
-                path: std::path::PathBuf::new(),
-                operation: "permanent cleanup".to_owned(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "secure permanent cleanup backend unavailable",
-                ),
-            }),
+            BackendTarget::Unsupported => Err(permanent_cleanup_unsupported()),
         }
     }
 
     pub(crate) fn move_to_trash(self) -> CoreResult<()> {
         match self.backend {
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            BackendTarget::Unix(target) => target.move_to_trash(),
-            #[cfg(target_os = "macos")]
-            BackendTarget::Macos(target) => target.move_to_trash(),
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.move_to_trash(),
             BackendTarget::Unsupported => Err(CoreError::SecureTrashUnavailable),
@@ -122,10 +83,21 @@ impl SecureTarget {
     }
 }
 
+fn permanent_cleanup_unsupported() -> CoreError {
+    CoreError::SecureOperationUnsupported {
+        path: std::path::PathBuf::new(),
+        operation: "permanent cleanup".to_owned(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure permanent cleanup backend unavailable",
+        ),
+    }
+}
+
 pub(crate) fn open_secure_target(
     root: &Path,
-    _providers: &ProviderSet,
     target: &ScanTarget,
+    intent: CleanupIntent,
 ) -> CoreResult<SecureTarget> {
     if target.identity.is_none() {
         return Err(CoreError::TargetIdentityUnavailable {
@@ -133,33 +105,25 @@ pub(crate) fn open_secure_target(
         });
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        return Ok(SecureTarget {
-            backend: BackendTarget::Unix(unix::open_secure_target(root, target)?),
-        });
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        return Ok(SecureTarget {
-            backend: BackendTarget::Macos(macos::open_secure_target(root, target)?),
-        });
+    let capabilities = backend_capabilities();
+    match intent {
+        CleanupIntent::Permanent if !capabilities.permanent => {
+            return Err(permanent_cleanup_unsupported())
+        }
+        CleanupIntent::Trash if !capabilities.trash => {
+            return Err(CoreError::SecureTrashUnavailable)
+        }
+        _ => {}
     }
 
     #[cfg(windows)]
     {
         Ok(SecureTarget {
-            backend: BackendTarget::Windows(windows::open_secure_target(root, target)?),
+            backend: BackendTarget::Windows(windows::open_secure_target(root, target, intent)?),
         })
     }
 
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        windows
-    )))]
+    #[cfg(not(windows))]
     {
         let _ = root;
         Ok(SecureTarget {
@@ -170,16 +134,15 @@ pub(crate) fn open_secure_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{open_secure_target, CleanupCapabilities, SecureTarget};
+    use super::{open_secure_target, BackendTarget, CleanupIntent, SecureTarget};
     use crate::error::CoreError;
-    use crate::model::{Category, ScanTarget};
-    use crate::scanner::ProviderSet;
+    use crate::model::{Category, FileIdentity, ScanTarget};
     use serde_json::json;
     use std::path::PathBuf;
 
     fn target() -> ScanTarget {
         ScanTarget::new(PathBuf::from("target"), Category::NodeModules, 0).with_identity(Some(
-            crate::model::FileIdentity {
+            FileIdentity {
                 volume_serial: 1,
                 file_id: [2; 16],
             },
@@ -189,7 +152,7 @@ mod tests {
     #[test]
     fn unsupported_backend_permanent_cleanup_serializes_production_contract() {
         let secure_target = SecureTarget {
-            backend: super::BackendTarget::Unsupported,
+            backend: BackendTarget::Unsupported,
         };
 
         let error = secure_target
@@ -224,7 +187,7 @@ mod tests {
         std::fs::create_dir_all(&target_path).unwrap();
         std::fs::write(target_path.join("content.txt"), b"content").unwrap();
         let secure_target = SecureTarget {
-            backend: super::BackendTarget::Unsupported,
+            backend: BackendTarget::Unsupported,
         };
         let error = secure_target
             .move_to_trash()
@@ -246,71 +209,56 @@ mod tests {
     }
 
     #[test]
-    fn secure_target_reports_no_capabilities_when_backend_is_unsupported() {
-        let secure_target = SecureTarget {
-            backend: super::BackendTarget::Unsupported,
-        };
-
-        assert_eq!(
-            secure_target.capabilities(),
-            CleanupCapabilities {
-                permanent: false,
-                trash: false,
-            }
-        );
-    }
-
-    #[test]
-    #[cfg(not(any(unix, windows)))]
-    fn secure_target_is_consumed_by_operation() {
-        let secure_target = open_secure_target(
-            PathBuf::from("root").as_path(),
-            &ProviderSet::free(),
-            &target(),
-        )
-        .expect("identity-bearing target should establish contract target");
-
-        let _ = secure_target.delete_permanently();
-    }
-
-    #[test]
     fn missing_identity_is_typed_before_secure_open() {
         let target = ScanTarget::new(PathBuf::from("target"), Category::NodeModules, 0);
 
         assert!(matches!(
             open_secure_target(
                 PathBuf::from("root").as_path(),
-                &ProviderSet::free(),
-                &target
+                &target,
+                CleanupIntent::Permanent
             ),
             Err(CoreError::TargetIdentityUnavailable { .. })
         ));
     }
 
     #[test]
-    fn unix_fd_backend_support_matrix_is_explicit() {
-        assert_eq!(
-            super::NON_MACOS_UNIX_FD_BACKEND_SUPPORTED,
-            cfg!(any(target_os = "linux", target_os = "android"))
-        );
+    fn capability_gate_matches_reported_capabilities() {
+        let capabilities = super::backend_capabilities();
+        let public = super::cleanup_capabilities();
+
+        assert_eq!(public.permanent_cleanup, capabilities.permanent);
+        assert_eq!(public.move_to_trash, capabilities.trash);
+        assert_eq!(public.secure_identity, cfg!(any(unix, windows)));
     }
 
-    #[cfg(all(
-        unix,
-        not(target_os = "linux"),
-        not(target_os = "android"),
-        not(target_os = "macos")
-    ))]
     #[test]
-    fn unsupported_unix_uses_typed_backend() {
-        assert!(!super::NON_MACOS_UNIX_FD_BACKEND_SUPPORTED);
-        let secure_target = SecureTarget {
-            backend: super::BackendTarget::Unsupported,
-        };
+    #[cfg(not(windows))]
+    fn unsupported_platform_refuses_before_touching_the_filesystem() {
+        // The target path does not exist: reaching the filesystem would fail with
+        // an open error instead of the typed capability errors asserted here.
+        let missing = PathBuf::from("uncached-core-nonexistent-root");
 
         assert!(matches!(
-            secure_target.delete_permanently(),
+            open_secure_target(&missing, &target(), CleanupIntent::Permanent),
             Err(CoreError::SecureOperationUnsupported { .. })
+        ));
+        assert!(matches!(
+            open_secure_target(&missing, &target(), CleanupIntent::Trash),
+            Err(CoreError::SecureTrashUnavailable)
+        ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_permanent_intent_passes_the_capability_gate() {
+        // Windows always reports permanent cleanup, so the gate must let the open
+        // proceed and fail on the missing target rather than on capabilities.
+        let missing = PathBuf::from("uncached-core-nonexistent-root");
+
+        assert!(matches!(
+            open_secure_target(&missing, &target(), CleanupIntent::Permanent),
+            Err(CoreError::SecureTargetOpenFailed { .. })
         ));
     }
 }

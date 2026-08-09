@@ -55,17 +55,48 @@ The following capability example is Windows-only:
 }
 ```
 
-On Linux, macOS, Android, and unsupported platforms, the same field is `false`; `secure_trash_unavailable` is an explicit backend/environment result and must not be treated as successful cleanup.
+On Linux, macOS, Android, and unsupported platforms, both `permanentCleanup` and `moveToTrash` are `false`; `secure_trash_unavailable` is an explicit backend/environment result and must not be treated as successful cleanup. Capabilities are checked before a cleanup opens anything: on a platform without a backend the call fails with `secure_operation_unsupported` or `secure_trash_unavailable` without touching the target tree.
+
+`secureIdentity` is `true` wherever Core can read a stable filesystem identity, which today is every `unix` target and Windows.
 
 ### Measured platform verification
 
 The current Windows backend was verified on `x86_64-pc-windows-msvc`: `cargo
-test` passed 131 tests. The suite includes Recycle Bin success and abort
-handling, target identity and reparse-point rejection, callback and
+test --all-features` passed 138 tests. The suite includes Recycle Bin success and
+abort handling, target identity and reparse-point rejection, callback and
 postcondition validation, concurrent final-release handling, replacement
 preservation, and permanent-delete behavior. `cargo check --target
-x86_64-unknown-linux-gnu` also passed. No macOS runtime or compile result is
-claimed here when `x86_64-apple-darwin` is not installed.
+x86_64-unknown-linux-gnu --all-targets` also passed. No macOS runtime or compile
+result is claimed here when `x86_64-apple-darwin` is not installed.
+
+### Secure open scope and limits
+
+Permanent cleanup deletes through retained handles, so its open retains a handle
+for every entry in the target subtree and verifies the whole tree before deleting
+anything. Two bounds keep that fail-closed instead of exhausting process
+resources: at most 500,000 entries (`secure_target_too_large`) and at most 512
+directory levels (`secure_target_too_deep`). Collection is iterative, so nesting
+depth cannot exhaust the stack, and it expands one directory level at a time
+across a shared worker pool while keeping a deterministic parent-before-child
+order.
+
+Trash cleanup does not open the subtree. It hands a path to the Shell and
+releases every handle before that call, so descendant handles could never guard
+the operation. Only the target and its ancestors are pinned, and their identities
+are revalidated immediately before and after the Shell boundary. The Shell moves
+the target as a single item and does not traverse reparse points inside it. A
+secure target opened for Trash refuses `delete_permanently` rather than deleting
+a partial tree.
+
+Access follows the same rule. A handle that will delete an entry is opened with
+`DELETE`; a handle that only pins an entry and reads its identity — every
+ancestor, the Trash target, and every revalidation — is opened for attribute
+access only. This matters because `DELETE` participates in Windows share-mode
+checks: requesting it fails with `secure_target_open_failed` and OS error 32
+whenever another process holds the entry open without delete sharing, which is
+the normal state of a build directory, an open editor, or a process's working
+directory. Permanent cleanup still pays that price because the handle is how it
+deletes; nothing else does.
 
 ### `ScanTargetDto`
 
@@ -79,7 +110,15 @@ claimed here when `x86_64-apple-darwin` is not installed.
 }
 ```
 
-`FileIdentity` is deliberately absent. `category` is the Core `Category` enum: `NodeModules`, `CargoTarget`, `NextJs`, `Turbo`, `PyCache`, `Gradle`, `DotNetObj`, `Docker`, or `Custom(String)`.
+`FileIdentity` is deliberately absent. `category` is always a string, never an
+object. Known values:
+
+```text
+NodeModules | CargoTarget | NextJs | Turbo | PyCache | Gradle | DotNetObj | Docker
+```
+
+A custom category serializes as `"Custom:<name>"` — for example
+`"Custom:docker-buildx"`. Any other string is rejected on deserialization.
 
 ### Core `TargetFoundDto`
 
@@ -134,12 +173,19 @@ sizing state.
   "success": true,
   "targetPath": "C:\\workspace\\target",
   "freedBytes": 42,
+  "sizePending": true,
   "sizeHasErrors": false
 }
 ```
 
-This Core DTO has exactly these four required fields. Desktop cleanup events
+This Core DTO has exactly these five required fields. Desktop cleanup events
 intentionally use a separate event DTO and may omit `targetPath`.
+
+Secure cleanup deletes through retained handles and never walks the target for a
+size, so it reports `freedBytes: 0` with `sizePending: true` and
+`sizeHasErrors: false`. `sizePending` means "not measured"; `sizeHasErrors` means
+"measured, and the walk hit errors". A consumer that needs a freed-bytes figure
+measures before cleanup.
 
 ## Errors
 
@@ -158,15 +204,21 @@ intentionally use a separate event DTO and may omit `targetPath`.
 
 ```text
 invalid_workspace
-invalid_target
 io
-trash
-recycle_bin_too_large
+provider_unavailable
+target_missing
+target_not_directory
+target_name_unsupported
+target_provider_mismatch
+target_context_invalid
+target_outside_workspace
 target_identity_unavailable
 target_identity_changed
 target_reparse_point
 secure_operation_unsupported
 secure_target_open_failed
+secure_target_too_large
+secure_target_too_deep
 secure_enumeration_failed
 secure_handle_query_failed
 secure_deletion_failed
@@ -176,6 +228,12 @@ secure_trash_operation_failed
 secure_trash_aborted
 secure_trash_postcondition_failed
 ```
+
+Every cleanup-policy rejection has its own code, so a consumer can tell "target is
+gone" from "target left the workspace" without parsing a message. The removed
+`invalid_target`, `trash` and `recycle_bin_too_large` codes had no producer left
+once cleanup moved to the secure backends; consumers must reject unknown codes as
+the version policy below requires.
 
 `message` is a stable public summary. `path` and `operation` are required keys
 whose values may be strings or null. Native error sources, private filesystem

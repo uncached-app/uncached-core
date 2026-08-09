@@ -35,7 +35,7 @@ pub struct TraversalEntry {
 }
 
 pub struct ProviderSet {
-    pub(crate) scanners: Vec<Box<dyn Scanner>>,
+    scanners: Vec<Box<dyn Scanner>>,
 }
 
 impl ProviderSet {
@@ -80,11 +80,21 @@ impl ProviderSet {
         self.scanners.is_empty()
     }
 
-    pub fn scanner_for(&self, category: Category) -> Option<&dyn Scanner> {
+    pub fn scanner_for(&self, category: &Category) -> Option<&dyn Scanner> {
         self.scanners
             .iter()
-            .find(|scanner| scanner.category() == category)
+            .find(|scanner| &scanner.category() == category)
             .map(Box::as_ref)
+    }
+
+    /// Returns the category of the first provider that both matches the name and
+    /// confirms the surrounding context. Traversal uses this instead of reaching
+    /// into the scanner collection.
+    pub fn classify(&self, name: &str, path: &Path) -> Option<Category> {
+        self.scanners
+            .iter()
+            .find(|scanner| scanner.matches(name) && scanner.confirm_context(path))
+            .map(|scanner| scanner.category())
     }
 
     pub fn categories(&self) -> impl Iterator<Item = Category> + '_ {

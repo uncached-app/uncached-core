@@ -1,5 +1,6 @@
 use crate::error::{CoreError, CoreResult};
 use crate::model::FileIdentity;
+use crate::parallel::worker_pool;
 use jwalk::{Parallelism, WalkDir};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,31 +19,29 @@ pub fn is_protected_directory(name: &str) -> bool {
         || name.eq_ignore_ascii_case("System Volume Information")
 }
 
-pub fn directory_size(root: &Path) -> CoreResult<u64> {
-    let report = directory_size_report(root)?;
-    if report.errors > 0 {
-        return Err(CoreError::InvalidTarget(format!(
-            "size traversal encountered {} errors",
-            report.errors
-        )));
-    }
-    Ok(report.bytes)
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DirectorySizeReport {
     pub bytes: u64,
     pub errors: u64,
 }
 
+fn size_parallelism() -> Parallelism {
+    match worker_pool() {
+        // `busy_timeout: None` keeps a saturated pool from aborting the walk:
+        // an aborted walk would report a silently truncated size.
+        Some(pool) => Parallelism::RayonExistingPool {
+            pool,
+            busy_timeout: None,
+        },
+        None => Parallelism::Serial,
+    }
+}
+
 pub fn directory_size_report(root: &Path) -> CoreResult<DirectorySizeReport> {
-    let workers = std::thread::available_parallelism()
-        .map(|count| count.get().clamp(1, 8))
-        .unwrap_or(1);
     WalkDir::new(root)
         .skip_hidden(false)
         .follow_links(false)
-        .parallelism(Parallelism::RayonNewPool(workers))
+        .parallelism(size_parallelism())
         .into_iter()
         .try_fold(DirectorySizeReport::default(), |mut report, entry| {
             let entry = match entry {
@@ -298,27 +297,22 @@ mod windows_tests {
     }
 }
 
-pub fn read_entries(path: &Path) -> CoreResult<Vec<fs::DirEntry>> {
-    fs::read_dir(path)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CoreError::from)
+/// True when `parent` directly contains a regular file named `name`. Uses
+/// `symlink_metadata`, so a symlinked marker file never confirms a deletion
+/// context: `is_file` is false for the link itself.
+pub fn has_marker_file(parent: &Path, name: &str) -> bool {
+    fs::symlink_metadata(parent.join(name)).is_ok_and(|metadata| metadata.is_file())
 }
 
 pub fn is_within(root: &Path, target: &Path) -> bool {
     target != root && target.starts_with(root)
 }
 
-pub fn is_safe_to_delete(path: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return false;
-    }
-    let Ok(canonical) = fs::canonicalize(path) else {
-        return false;
-    };
-    canonical.parent().is_some() && !is_critical_directory(&canonical)
+/// Rejects paths that must never be deleted. Callers pass an already canonical
+/// path — the cleanup policy canonicalizes once — so this resolves nothing and
+/// performs no filesystem access of its own.
+pub fn is_safe_to_delete(canonical: &Path) -> bool {
+    canonical.parent().is_some() && !is_critical_directory(canonical)
 }
 
 fn is_critical_directory(path: &Path) -> bool {
