@@ -1088,8 +1088,8 @@ mod tests {
     }
 
     #[test]
-    fn trash_moves_verified_target_without_mutating_contents_first() {
-        let fixture = Fixture::new("unsupported-trash");
+    fn trash_moves_verified_target_to_recycle_bin() {
+        let fixture = Fixture::new("trash");
         let target_path = fixture.root.join("target");
         fs::create_dir(&target_path).unwrap();
         fs::write(target_path.join("child.txt"), b"data").unwrap();
@@ -1098,15 +1098,10 @@ mod tests {
         let secure = open_secure_target(&fixture.root, &target).unwrap();
 
         assert!(secure.capabilities().trash);
-        match secure.move_to_trash() {
-            Ok(()) => assert!(!target_path.exists()),
-            Err(CoreError::SecureTrashUnavailable)
-            | Err(CoreError::SecureOperationUnsupported { .. }) => {
-                eprintln!("skipping: Windows Trash backend unavailable or unsupported");
-                assert!(target_path.exists());
-            }
-            Err(error) => panic!("verified target should move to Recycle Bin: {error:?}"),
-        }
+        secure
+            .move_to_trash()
+            .expect("compiled Windows Trash backend should move target");
+        assert!(!target_path.exists());
     }
 
     #[test]

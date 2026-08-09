@@ -36,12 +36,14 @@ All fields below are serialized with the shown camelCase names.
 ```json
 {
   "permanentCleanup": true,
-  "moveToTrash": false,
+  "moveToTrash": true,
   "secureIdentity": true
 }
 ```
 
 `permanentCleanup` and `moveToTrash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection.
+
+Permanent cleanup is handle-based and provides stronger identity guarantees. On Windows, Trash uses Shell `IFileOperation` with revalidation before and after releasing verification handles. This leaves a residual Shell namespace race that cannot be made handle-atomic; ambiguous results fail closed. A `moveToTrash` capability of `true` means the backend is available, not that every target operation will succeed.
 
 ### `ScanTargetDto`
 
@@ -147,6 +149,10 @@ secure_enumeration_failed
 secure_handle_query_failed
 secure_deletion_failed
 secure_trash_unavailable
+secure_trash_initialization_failed
+secure_trash_operation_failed
+secure_trash_aborted
+secure_trash_postcondition_failed
 ```
 
 `message` is a stable public summary. `path` and `operation` are required keys

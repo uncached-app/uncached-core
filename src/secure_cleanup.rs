@@ -213,8 +213,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_backend_trash_error_intentionally_has_no_operation_contract_field() {
+    fn unsupported_backend_trash_error_preserves_filesystem_without_operation_field() {
         // Trash-unavailable is a capability error, not an operation-specific failure.
+        let root = std::env::temp_dir().join(format!(
+            "uncached-core-unsupported-trash-{}",
+            std::process::id()
+        ));
+        let target_path = root.join("target");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&target_path).unwrap();
+        std::fs::write(target_path.join("content.txt"), b"content").unwrap();
         let secure_target = SecureTarget {
             backend: super::BackendTarget::Unsupported,
         };
@@ -230,6 +238,11 @@ mod tests {
         );
         assert_eq!(info.operation, None);
         assert!(serde_json::to_value(info).unwrap()["operation"].is_null());
+        assert_eq!(
+            std::fs::read(target_path.join("content.txt")).unwrap(),
+            b"content"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

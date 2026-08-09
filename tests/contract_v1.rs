@@ -315,7 +315,7 @@ fn platform_and_capabilities_serialize_as_contract_values() {
 
     let value = serde_json::to_value(CleanupCapabilities {
         permanent_cleanup: true,
-        move_to_trash: false,
+        move_to_trash: true,
         secure_identity: true,
     })
     .unwrap();
@@ -332,14 +332,14 @@ fn public_capabilities_reflect_current_secure_backend() {
 
     assert_eq!(capabilities.secure_identity, secure_identity_supported);
     assert_eq!(capabilities.permanent_cleanup, cfg!(windows));
-    assert!(!capabilities.move_to_trash);
+    assert_eq!(capabilities.move_to_trash, cfg!(windows));
 
     let value = serde_json::to_value(capabilities).unwrap();
     assert_eq!(
         value,
         json!({
             "permanentCleanup": cfg!(windows),
-            "moveToTrash": false,
+            "moveToTrash": cfg!(windows),
             "secureIdentity": secure_identity_supported,
         })
     );
@@ -488,6 +488,13 @@ fn typed_trash_errors_have_stable_sanitized_contract_fields() {
             },
             "secure_trash_initialization_failed",
             "secure Trash initialization failed",
+            None,
+            None,
+        ),
+        (
+            CoreError::SecureTrashUnavailable,
+            "secure_trash_unavailable",
+            "secure Trash is unavailable",
             None,
             None,
         ),
