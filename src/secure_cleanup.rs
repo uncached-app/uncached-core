@@ -40,7 +40,7 @@ fn backend_capabilities() -> CleanupCapabilities {
     {
         return CleanupCapabilities {
             permanent: true,
-            trash: true,
+            trash: windows::shell_backend_available(),
         };
     }
 

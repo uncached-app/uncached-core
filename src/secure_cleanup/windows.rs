@@ -54,11 +54,8 @@ pub(crate) fn install_shell_item_boundary_hook(hook: impl FnOnce() + Send + 'sta
 }
 
 #[cfg(test)]
-fn run_shell_item_boundary_hook() {
-    let hook = SHELL_ITEM_BOUNDARY_HOOK.with(|slot| slot.borrow_mut().take());
-    if let Some(hook) = hook {
-        hook();
-    }
+fn take_shell_item_boundary_hook() -> Option<ShellItemBoundaryHook> {
+    SHELL_ITEM_BOUNDARY_HOOK.with(|slot| slot.borrow_mut().take())
 }
 
 #[cfg(test)]
@@ -545,6 +542,16 @@ struct AncestorSnapshot {
     path: PathBuf,
 }
 
+struct ShellTrashInput {
+    path: PathBuf,
+    expected_identity: FileIdentity,
+    ancestor_snapshots: Vec<AncestorSnapshot>,
+    #[cfg(test)]
+    boundary_hook: Option<ShellItemBoundaryHook>,
+    #[cfg(test)]
+    force_aborted_result: bool,
+}
+
 #[derive(Debug)]
 pub(super) struct WindowsTarget {
     _ancestors: Vec<Ancestor>,
@@ -555,7 +562,7 @@ impl WindowsTarget {
     pub(super) fn capabilities(&self) -> super::CleanupCapabilities {
         super::CleanupCapabilities {
             permanent: true,
-            trash: true,
+            trash: shell_backend_available(),
         }
     }
 
@@ -605,45 +612,184 @@ impl WindowsTarget {
                 path: ancestor.path.clone(),
             })
             .collect();
-        // Shell operates by namespace path, so retained verification handles must be released
-        // before IFileOperation. Revalidate immediately after release. This closes the known
-        // handle-to-path gap, but cannot make the later Shell operation handle-atomic: the
-        // approved design accepts that residual namespace race. Any identity or reparse-point
-        // ambiguity detected here fails closed.
         drop(entries);
         drop(ancestors);
-        for ancestor in &ancestor_snapshots {
-            revalidate_shell_ancestor(ancestor, &path)?;
-        }
-        revalidate_shell_target(&path, expected_identity)?;
-        #[cfg(test)]
-        run_shell_item_boundary_hook();
-        for ancestor in &ancestor_snapshots {
-            revalidate_shell_ancestor(ancestor, &path)?;
-        }
-        revalidate_shell_target(&path, expected_identity)?;
-        let _apartment = ComApartment::initialize_sta()?;
-        let wide = shell_wide_path(&path);
-        let mut shell_item = std::ptr::null_mut();
-        // SAFETY: wide is NUL-terminated and output pointer is valid storage.
-        let result = unsafe {
-            SHCreateItemFromParsingName(
-                wide.as_ptr(),
-                std::ptr::null_mut(),
-                &IID_ISHELL_ITEM,
-                &mut shell_item,
-            )
+        let input = ShellTrashInput {
+            path,
+            expected_identity,
+            ancestor_snapshots,
+            #[cfg(test)]
+            boundary_hook: take_shell_item_boundary_hook(),
+            #[cfg(test)]
+            force_aborted_result: take_forced_trash_abort(),
         };
-        if result < 0 {
-            return Err(map_trash_error(
-                &path,
-                "SHCreateItemFromParsingName",
-                result,
-            ));
-        }
-        // SAFETY: successful API call initialized a COM interface pointer.
-        let shell_item = unsafe { ComPtr::<IShellItemTag>::from_raw(shell_item) };
+        std::thread::spawn(move || run_trash_on_sta(input))
+            .join()
+            .map_err(|_| CoreError::SecureTrashInitializationFailed {
+                source: std::io::Error::other("Windows Shell STA thread panicked"),
+            })?
+    }
+}
 
+fn run_trash_on_sta(input: ShellTrashInput) -> CoreResult<()> {
+    let ShellTrashInput {
+        path,
+        expected_identity,
+        ancestor_snapshots,
+        #[cfg(test)]
+        boundary_hook,
+        #[cfg(test)]
+        force_aborted_result,
+    } = input;
+    // All validation and Shell calls stay on this dedicated STA. Only owned, Send-safe input
+    // crosses the thread boundary; no handle or COM interface is transferred.
+    let _apartment = ComApartment::initialize_sta()?;
+    for ancestor in &ancestor_snapshots {
+        revalidate_shell_ancestor(ancestor, &path)?;
+    }
+    revalidate_shell_target(&path, expected_identity)?;
+    #[cfg(test)]
+    if let Some(hook) = boundary_hook {
+        hook();
+    }
+    for ancestor in &ancestor_snapshots {
+        revalidate_shell_ancestor(ancestor, &path)?;
+    }
+    revalidate_shell_target(&path, expected_identity)?;
+    let wide = shell_wide_path(&path);
+    let mut shell_item = std::ptr::null_mut();
+    // SAFETY: wide is NUL-terminated and output pointer is valid storage.
+    let result = unsafe {
+        SHCreateItemFromParsingName(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            &IID_ISHELL_ITEM,
+            &mut shell_item,
+        )
+    };
+    if result < 0 {
+        return Err(map_trash_error(
+            &path,
+            "SHCreateItemFromParsingName",
+            result,
+        ));
+    }
+    // SAFETY: successful API call initialized a COM interface pointer.
+    let shell_item = unsafe { ComPtr::<IShellItemTag>::from_raw(shell_item) };
+
+    let mut file_operation = std::ptr::null_mut();
+    // SAFETY: CLSID/IID are valid and output pointer is valid storage.
+    let result = unsafe {
+        CoCreateInstance(
+            &FileOperation,
+            std::ptr::null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &IID_IFILE_OPERATION,
+            &mut file_operation,
+        )
+    };
+    if result < 0 {
+        return Err(map_trash_error(&path, "CoCreateInstance", result));
+    }
+    // SAFETY: successful API call initialized a COM interface pointer.
+    let file_operation = unsafe { ComPtr::<IFileOperationTag>::from_raw(file_operation) };
+    let vtable = unsafe { *(file_operation.ptr as *mut *const IFileOperationVtbl) };
+    let flags = FOF_ALLOWUNDO | FOF_NO_UI;
+    // SAFETY: file_operation and vtable are valid COM objects; flags are documented ABI value.
+    let result = unsafe { ((*vtable).set_operation_flags)(file_operation.ptr, flags) };
+    if result < 0 {
+        return Err(map_trash_error(&path, "SetOperationFlags", result));
+    }
+    let (sink, evidence) = ProgressSink::allocate(&path, shell_item.ptr);
+    let mut cookie = 0;
+    // SAFETY: sink is a valid IFileOperationProgressSink ABI pointer and cookie is writable.
+    unsafe { progress_sink_add_ref(sink) };
+    unsafe { progress_sink_release(sink) };
+    let result = unsafe { ((*vtable).advise)(file_operation.ptr, sink, &mut cookie) };
+    // Release sink's construction reference. Successful Advise retains its own reference.
+    unsafe { progress_sink_release(sink) };
+    if result < 0 {
+        return Err(map_trash_error(&path, "Advise", result));
+    }
+
+    let operation_result = (|| {
+        #[cfg(test)]
+        if !force_aborted_result {
+            // SAFETY: shell_item and progress subscription are valid COM objects.
+            let result = unsafe {
+                ((*vtable).delete_item)(file_operation.ptr, shell_item.ptr, std::ptr::null_mut())
+            };
+            if result < 0 {
+                return Err(map_trash_error(&path, "DeleteItem", result));
+            }
+        }
+        #[cfg(not(test))]
+        {
+            // SAFETY: shell_item and progress subscription are valid COM objects.
+            let result = unsafe {
+                ((*vtable).delete_item)(file_operation.ptr, shell_item.ptr, std::ptr::null_mut())
+            };
+            if result < 0 {
+                return Err(map_trash_error(&path, "DeleteItem", result));
+            }
+        }
+        // SAFETY: queued operation belongs to valid file_operation object.
+        #[cfg(test)]
+        let result = if force_aborted_result {
+            0
+        } else {
+            unsafe { ((*vtable).perform_operations)(file_operation.ptr) }
+        };
+        #[cfg(not(test))]
+        let result = unsafe { ((*vtable).perform_operations)(file_operation.ptr) };
+        if result < 0 {
+            return Err(map_trash_error(&path, "PerformOperations", result));
+        }
+        let mut aborted = 0;
+        // SAFETY: output pointer is valid and object remains alive.
+        let result =
+            unsafe { ((*vtable).get_any_operations_aborted)(file_operation.ptr, &mut aborted) };
+        if result < 0 {
+            return Err(map_trash_error(&path, "GetAnyOperationsAborted", result));
+        }
+        #[cfg(test)]
+        if force_aborted_result {
+            aborted = 1;
+        }
+        map_aborted_operations(&path, aborted != 0)?;
+        let evidence = evidence
+            .lock()
+            .map_err(|_| CoreError::SecureTrashPostconditionFailed { path: path.clone() })?;
+        classify_trash_progress(&path, &evidence)
+    })();
+
+    // SAFETY: file_operation remains alive and cookie came from Advise.
+    let unadvise_result = unsafe { ((*vtable).unadvise)(file_operation.ptr, cookie) };
+    if unadvise_result < 0 {
+        return Err(map_trash_error(&path, "Unadvise", unadvise_result));
+    }
+    operation_result?;
+    // PerformOperations has no handle-atomic postcondition. If the validated namespace path
+    // still resolves, or cannot be classified unambiguously, fail closed rather than claim
+    // the original target reached the Recycle Bin. A replacement can still win the residual
+    // race between this check and Shell's operation; that limitation is intentional.
+    verify_shell_target_absent(&path, expected_identity, &ancestor_snapshots)?;
+    Ok(())
+}
+
+// windows-sys exposes these Shell COM interfaces through their ABI, not typed wrappers.
+enum IShellItemTag {}
+enum IFileOperationTag {}
+
+fn hresult_error(result: HRESULT) -> std::io::Error {
+    std::io::Error::from_raw_os_error(result)
+}
+
+pub(super) fn shell_backend_available() -> bool {
+    std::thread::spawn(|| {
+        let Ok(_apartment) = ComApartment::initialize_sta() else {
+            return false;
+        };
         let mut file_operation = std::ptr::null_mut();
         // SAFETY: CLSID/IID are valid and output pointer is valid storage.
         let result = unsafe {
@@ -655,87 +801,42 @@ impl WindowsTarget {
                 &mut file_operation,
             )
         };
-        if result < 0 {
-            return Err(map_trash_error(&path, "CoCreateInstance", result));
+        if result < 0 || file_operation.is_null() {
+            return false;
         }
-        // SAFETY: successful API call initialized a COM interface pointer.
-        let file_operation = unsafe { ComPtr::<IFileOperationTag>::from_raw(file_operation) };
-        let vtable = unsafe { *(file_operation.ptr as *mut *const IFileOperationVtbl) };
-        let flags = FOF_ALLOWUNDO | FOF_NO_UI;
-        // SAFETY: file_operation and vtable are valid COM objects; flags are documented ABI value.
-        let result = unsafe { ((*vtable).set_operation_flags)(file_operation.ptr, flags) };
-        if result < 0 {
-            return Err(map_trash_error(&path, "SetOperationFlags", result));
-        }
-        let (sink, evidence) = ProgressSink::allocate(&path, shell_item.ptr);
-        let mut cookie = 0;
-        // SAFETY: sink is a valid IFileOperationProgressSink ABI pointer and cookie is writable.
-        unsafe { progress_sink_add_ref(sink) };
-        unsafe { progress_sink_release(sink) };
-        let result = unsafe { ((*vtable).advise)(file_operation.ptr, sink, &mut cookie) };
-        // Release sink's construction reference. Successful Advise retains its own reference.
-        unsafe { progress_sink_release(sink) };
-        if result < 0 {
-            return Err(map_trash_error(&path, "Advise", result));
-        }
+        // SAFETY: successful activation returned one owned COM interface reference.
+        let _file_operation = unsafe { ComPtr::<IFileOperationTag>::from_raw(file_operation) };
+        true
+    })
+    .join()
+    .unwrap_or(false)
+}
 
-        let operation_result = (|| {
-            // SAFETY: shell_item and progress subscription are valid COM objects.
-            let result = unsafe {
-                ((*vtable).delete_item)(file_operation.ptr, shell_item.ptr, std::ptr::null_mut())
-            };
-            if result < 0 {
-                return Err(map_trash_error(&path, "DeleteItem", result));
-            }
-            #[cfg(test)]
-            if take_forced_trash_abort() {
-                return Err(CoreError::SecureTrashAborted { path: path.clone() });
-            }
-            // SAFETY: queued operation belongs to valid file_operation object.
-            let result = unsafe { ((*vtable).perform_operations)(file_operation.ptr) };
-            if result < 0 {
-                return Err(map_trash_error(&path, "PerformOperations", result));
-            }
-            let mut aborted = 0;
-            // SAFETY: output pointer is valid and object remains alive.
-            let result =
-                unsafe { ((*vtable).get_any_operations_aborted)(file_operation.ptr, &mut aborted) };
-            if result < 0 {
-                return Err(map_trash_error(&path, "GetAnyOperationsAborted", result));
-            }
-            if aborted != 0 {
-                return Err(CoreError::SecureTrashAborted { path: path.clone() });
-            }
-            let evidence = evidence
-                .lock()
-                .map_err(|_| CoreError::SecureTrashPostconditionFailed { path: path.clone() })?;
-            classify_trash_progress(&path, &evidence)
-        })();
-
-        // SAFETY: file_operation remains alive and cookie came from Advise.
-        let unadvise_result = unsafe { ((*vtable).unadvise)(file_operation.ptr, cookie) };
-        if unadvise_result < 0 {
-            return Err(map_trash_error(&path, "Unadvise", unadvise_result));
-        }
-        operation_result?;
-        // PerformOperations has no handle-atomic postcondition. If the validated namespace path
-        // still resolves, or cannot be classified unambiguously, fail closed rather than claim
-        // the original target reached the Recycle Bin. A replacement can still win the residual
-        // race between this check and Shell's operation; that limitation is intentional.
-        verify_shell_target_absent(&path, expected_identity, &ancestor_snapshots)?;
+fn map_aborted_operations(path: &Path, aborted: bool) -> CoreResult<()> {
+    if aborted {
+        Err(CoreError::SecureTrashAborted {
+            path: path.to_path_buf(),
+        })
+    } else {
         Ok(())
     }
 }
 
-// windows-sys exposes these Shell COM interfaces through their ABI, not typed wrappers.
-enum IShellItemTag {}
-enum IFileOperationTag {}
-
-fn hresult_error(result: HRESULT) -> std::io::Error {
-    std::io::Error::from_raw_os_error(result)
-}
-
 fn map_trash_error(path: &Path, operation: &str, result: HRESULT) -> CoreError {
+    if matches!(
+        operation,
+        "CoCreateInstance" | "SetOperationFlags" | "Advise"
+    ) && matches!(
+        result,
+        -2_147_221_164 // REGDB_E_CLASSNOTREG
+            | -2_147_221_163 // REGDB_E_IIDNOTREG
+            | -2_147_467_263 // E_NOTIMPL
+            | -2_147_467_262 // E_NOINTERFACE
+            | -2_147_024_846 // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)
+            | -2_147_024_894 // HRESULT_FROM_WIN32(ERROR_CALL_NOT_IMPLEMENTED)
+    ) {
+        return CoreError::SecureTrashUnavailable;
+    }
     CoreError::SecureTrashOperationFailed {
         path: path.to_path_buf(),
         operation: operation.to_owned(),
@@ -1263,8 +1364,8 @@ fn open_error_path_with_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_trash_progress, identity_matches, map_disposition_error, map_trash_error,
-        open_entry_with_access, open_error_path_with_source, open_secure_target,
+        classify_trash_progress, identity_matches, map_aborted_operations, map_disposition_error,
+        map_trash_error, open_entry_with_access, open_error_path_with_source, open_secure_target,
         os_string_from_wide, parse_directory_records, progress_sink_add_ref, progress_sink_release,
         revalidate_shell_ancestor, revalidate_shell_target, shell_wide_path,
         verify_shell_target_absent, AncestorSnapshot, ProgressSink, TrashProgressEvidence,
@@ -1350,6 +1451,31 @@ mod tests {
                     && operation == "PerformOperations"
                     && source.raw_os_error() == Some(hresult)
         ));
+    }
+
+    #[test]
+    fn documented_shell_unavailability_maps_to_typed_unavailable_error() {
+        let path = PathBuf::from("target");
+        for hresult in [
+            -2_147_221_164, // REGDB_E_CLASSNOTREG
+            -2_147_467_262, // E_NOINTERFACE
+            -2_147_024_846, // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)
+        ] {
+            assert!(matches!(
+                map_trash_error(&path, "CoCreateInstance", hresult),
+                CoreError::SecureTrashUnavailable
+            ));
+        }
+    }
+
+    #[test]
+    fn get_any_operations_aborted_maps_to_typed_abort() {
+        let path = PathBuf::from("target");
+        assert!(matches!(
+            map_aborted_operations(&path, true),
+            Err(CoreError::SecureTrashAborted { path: actual }) if actual == path
+        ));
+        assert!(map_aborted_operations(&path, false).is_ok());
     }
 
     #[test]
@@ -1582,10 +1708,11 @@ mod tests {
         let secure = open_secure_target(&fixture.root, &target).unwrap();
 
         super::force_next_trash_abort();
-        assert!(matches!(
-            secure.move_to_trash(),
-            Err(CoreError::SecureTrashAborted { path }) if path == target_path
-        ));
+        let result = secure.move_to_trash();
+        assert!(
+            matches!(result, Err(CoreError::SecureTrashAborted { ref path }) if path == &target_path),
+            "unexpected forced-abort result: {result:?}"
+        );
         assert_eq!(
             fs::read(target_path.join("original.txt")).unwrap(),
             b"original"
