@@ -150,8 +150,21 @@ struct Entry {
 }
 
 #[derive(Debug)]
+struct Ancestor {
+    handle: Handle,
+    identity: FileIdentity,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+struct AncestorSnapshot {
+    identity: FileIdentity,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
 pub(super) struct WindowsTarget {
-    _ancestors: Vec<Handle>,
+    _ancestors: Vec<Ancestor>,
     entries: Vec<Entry>,
 }
 
@@ -202,6 +215,13 @@ impl WindowsTarget {
             .expect("WindowsTarget must contain its verified target entry");
         let path = target.path.clone();
         let expected_identity = target.identity;
+        let ancestor_snapshots: Vec<_> = ancestors
+            .iter()
+            .map(|ancestor| AncestorSnapshot {
+                identity: ancestor.identity,
+                path: ancestor.path.clone(),
+            })
+            .collect();
         // Shell operates by namespace path, so retained verification handles must be released
         // before IFileOperation. Revalidate immediately after release. This closes the known
         // handle-to-path gap, but cannot make the later Shell operation handle-atomic: the
@@ -209,6 +229,9 @@ impl WindowsTarget {
         // ambiguity detected here fails closed.
         drop(entries);
         drop(ancestors);
+        for ancestor in &ancestor_snapshots {
+            revalidate_shell_ancestor(ancestor, &path)?;
+        }
         revalidate_shell_target(&path, expected_identity)?;
         let _apartment = ComApartment::initialize_sta()?;
         let wide = shell_wide_path(&path);
@@ -312,6 +335,21 @@ fn revalidate_shell_target(path: &Path, expected: FileIdentity) -> CoreResult<()
     Ok(())
 }
 
+fn revalidate_shell_ancestor(ancestor: &AncestorSnapshot, target: &Path) -> CoreResult<()> {
+    if target.strip_prefix(&ancestor.path).is_err() {
+        return Err(CoreError::TargetIdentityChanged {
+            path: target.to_path_buf(),
+        });
+    }
+    let entry = open_directory(&ancestor.path, &ancestor.path)?;
+    if entry.identity != ancestor.identity {
+        return Err(CoreError::TargetIdentityChanged {
+            path: ancestor.path.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn verify_shell_postcondition(path: &Path, expected: FileIdentity) -> CoreResult<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -353,7 +391,11 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
     let mut ancestors = Vec::new();
     let mut current = root.to_path_buf();
     let root_entry = open_directory(root, &target.path)?;
-    ancestors.push(root_entry.handle);
+    ancestors.push(Ancestor {
+        handle: root_entry.handle,
+        identity: root_entry.identity,
+        path: root_entry.path,
+    });
     for component in &components[..components.len() - 1] {
         let Component::Normal(name) = component else {
             return Err(open_error(
@@ -362,7 +404,12 @@ pub(super) fn open_secure_target(root: &Path, target: &ScanTarget) -> CoreResult
             ));
         };
         current.push(name);
-        ancestors.push(open_directory(&current, &target.path)?.handle);
+        let entry = open_directory(&current, &target.path)?;
+        ancestors.push(Ancestor {
+            handle: entry.handle,
+            identity: entry.identity,
+            path: entry.path,
+        });
     }
 
     let target_path = current.join(basename);
@@ -793,7 +840,7 @@ mod tests {
     use super::{
         identity_matches, map_disposition_error, map_trash_error, open_entry_with_access,
         open_error_path_with_source, open_secure_target, os_string_from_wide,
-        parse_directory_records, shell_wide_path,
+        parse_directory_records, revalidate_shell_ancestor, shell_wide_path, AncestorSnapshot,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
@@ -1078,6 +1125,37 @@ mod tests {
         assert!(matches!(
             open_secure_target(&fixture.root, &ancestor),
             Err(CoreError::TargetReparsePoint { .. })
+        ));
+    }
+
+    #[test]
+    fn shell_revalidation_rejects_replaced_ancestor_reparse_point() {
+        let fixture = Fixture::new("revalidate-ancestor");
+        let real = fixture.root.join("real");
+        let ancestor = fixture.root.join("ancestor");
+        let target = ancestor.join("target");
+        fs::create_dir(&real).unwrap();
+        fs::create_dir(&ancestor).unwrap();
+        fs::create_dir(&target).unwrap();
+
+        let opened = super::open_directory(&ancestor, &target).unwrap();
+        let snapshot = AncestorSnapshot {
+            identity: opened.identity,
+            path: opened.path.clone(),
+        };
+        drop(opened);
+        fs::remove_dir(&target).unwrap();
+        fs::remove_dir(&ancestor).unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_dir(&real, &ancestor) {
+            if error.raw_os_error() == Some(1314) {
+                return;
+            }
+            panic!("creating replacement ancestor junction failed: {error}");
+        }
+
+        assert!(matches!(
+            revalidate_shell_ancestor(&snapshot, &target),
+            Err(CoreError::TargetReparsePoint { path }) if path == ancestor
         ));
     }
 
