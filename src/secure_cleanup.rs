@@ -9,6 +9,8 @@ mod macos;
 mod unix;
 #[cfg(windows)]
 mod windows;
+#[cfg(all(test, windows))]
+pub(crate) use windows::install_shell_item_boundary_hook;
 
 pub(crate) const NON_MACOS_UNIX_FD_BACKEND_SUPPORTED: bool =
     cfg!(any(target_os = "linux", target_os = "android"));

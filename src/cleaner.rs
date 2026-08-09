@@ -531,6 +531,8 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn trash_cleanup_race_preserves_original_and_replacement() {
+        use crate::secure_cleanup::install_shell_item_boundary_hook;
+
         let root = fixture();
         let _cleanup = CleanupGuard(root.clone());
         let project = root.join("project");
@@ -539,61 +541,25 @@ mod tests {
         fs::create_dir_all(&target_path).unwrap();
         fs::write(target_path.join("original.txt"), b"original").unwrap();
         fs::write(project.join("package.json"), b"{}").unwrap();
-        fs::create_dir(&archived).unwrap();
-        fs::write(archived.join("original.txt"), b"original").unwrap();
         let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 8)
             .with_identity(file_identity(&target_path));
         let source = project.join("node_modules-replacement");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("replacement.txt"), b"replacement").unwrap();
-        let (done_tx, done_rx) = mpsc::channel();
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let worker_slot = Arc::new(Mutex::new(None));
-        let worker_slot_for_hook = Arc::clone(&worker_slot);
-        let source_for_worker = source.clone();
-        let target_for_worker = target_path.clone();
-        install_secure_target_hook(move || {
-            let worker = std::thread::spawn(move || loop {
-                let rename_result = rename_replacing(&source_for_worker, &target_for_worker);
-                match rename_result {
-                    Ok(()) => {
-                        let _ = done_tx.send(Ok(()));
-                        break;
-                    }
-                    Err(error) => {
-                        if error.raw_os_error() != Some(5) {
-                            let _ = done_tx.send(Err(error.to_string()));
-                            break;
-                        }
-                        let _ = ready_tx.send(());
-                        if stop_rx.try_recv().is_ok() {
-                            break;
-                        }
-                        std::thread::yield_now();
-                    }
-                }
-            });
-            ready_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("worker should observe retained-handle rename refusal");
-            *worker_slot_for_hook.lock().unwrap() = Some(worker);
+        let source_for_hook = source.clone();
+        let target_for_hook = target_path.clone();
+        let archived_for_hook = archived.clone();
+        install_shell_item_boundary_hook(move || {
+            fs::rename(&target_for_hook, &archived_for_hook).unwrap();
+            fs::rename(&source_for_hook, &target_for_hook).unwrap();
         });
 
         let result = clean_to_trash(&root, &ProviderSet::free(), &target);
-        let worker_result = done_rx.recv_timeout(Duration::from_secs(5));
-        if worker_result.is_err() {
-            let _ = stop_tx.send(());
-        }
-        let worker = worker_slot.lock().unwrap().take().unwrap();
-        worker.join().unwrap();
-        worker_result.unwrap().unwrap();
 
         assert!(
             matches!(
                 result,
-                Ok(_)
-                    | Err(CoreError::TargetIdentityChanged { .. })
+                Err(CoreError::TargetIdentityChanged { .. })
                     | Err(CoreError::SecureTrashPostconditionFailed { .. })
             ),
             "unexpected race result: {result:?}"

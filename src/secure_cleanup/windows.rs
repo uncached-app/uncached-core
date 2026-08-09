@@ -1,5 +1,7 @@
 use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ffi::OsString;
 use std::marker::PhantomData;
@@ -30,6 +32,27 @@ use windows_sys::Win32::UI::Shell::{
 
 const IID_ISHELL_ITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
 const IID_IFILE_OPERATION: GUID = GUID::from_u128(0x947aab5f_0a5c_4c13_b4d6_4bf7836fc9f8);
+
+#[cfg(test)]
+type ShellItemBoundaryHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+thread_local! {
+    static SHELL_ITEM_BOUNDARY_HOOK: RefCell<Option<ShellItemBoundaryHook>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn install_shell_item_boundary_hook(hook: impl FnOnce() + Send + 'static) {
+    SHELL_ITEM_BOUNDARY_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_shell_item_boundary_hook() {
+    let hook = SHELL_ITEM_BOUNDARY_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
 
 #[repr(C)]
 struct IUnknownVtbl {
@@ -229,6 +252,12 @@ impl WindowsTarget {
         // ambiguity detected here fails closed.
         drop(entries);
         drop(ancestors);
+        for ancestor in &ancestor_snapshots {
+            revalidate_shell_ancestor(ancestor, &path)?;
+        }
+        revalidate_shell_target(&path, expected_identity)?;
+        #[cfg(test)]
+        run_shell_item_boundary_hook();
         for ancestor in &ancestor_snapshots {
             revalidate_shell_ancestor(ancestor, &path)?;
         }
