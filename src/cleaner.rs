@@ -102,6 +102,7 @@ pub fn clean_to_trash(
     )?;
     #[cfg(all(test, any(unix, windows)))]
     run_secure_target_hook();
+    validate_clean_policy(&policy.root, providers, &canonical_target(target, &policy))?;
     secure_target.move_to_trash().map(|()| CleanReport {
         freed_bytes: 0,
         size_has_errors: true,
@@ -429,13 +430,21 @@ mod tests {
 
         let result = super::clean_to_trash(&root, &ProviderSet::free(), &target);
 
-        assert!(
-            matches!(result, Err(CoreError::SecureTrashUnavailable)),
-            "unexpected result: {result:?}"
-        );
-        assert!(target_path.is_dir());
-        assert!(target_path.join("child.txt").exists());
-        assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
+        #[cfg(windows)]
+        {
+            result.unwrap();
+            assert!(!target_path.exists());
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(
+                matches!(result, Err(CoreError::SecureTrashUnavailable)),
+                "unexpected result: {result:?}"
+            );
+            assert!(target_path.is_dir());
+            assert!(target_path.join("child.txt").exists());
+            assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
+        }
         let _ = fs::remove_dir_all(root);
     }
 
@@ -486,8 +495,16 @@ mod tests {
             &target,
         );
 
-        assert!(matches!(result, Err(CoreError::SecureTrashUnavailable)));
-        assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
+        #[cfg(windows)]
+        {
+            result.unwrap();
+            assert!(!target_path.exists());
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(matches!(result, Err(CoreError::SecureTrashUnavailable)));
+            assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
+        }
         let _ = fs::remove_dir_all(root);
     }
 

@@ -350,26 +350,15 @@ fn revalidate_shell_ancestor(ancestor: &AncestorSnapshot, target: &Path) -> Core
     Ok(())
 }
 
-fn verify_shell_postcondition(path: &Path, expected: FileIdentity) -> CoreResult<()> {
+fn verify_shell_postcondition(path: &Path, _expected: FileIdentity) -> CoreResult<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(CoreError::SecureTrashPostconditionFailed {
             path: path.to_path_buf(),
         }),
-        Ok(_) => match open_entry(path, path) {
-            Ok(entry) if entry.identity != expected => Err(CoreError::TargetIdentityChanged {
-                path: path.to_path_buf(),
-            }),
-            Ok(_) => Err(CoreError::SecureTrashPostconditionFailed {
-                path: path.to_path_buf(),
-            }),
-            Err(CoreError::TargetReparsePoint { path }) => {
-                Err(CoreError::TargetReparsePoint { path })
-            }
-            Err(_) => Err(CoreError::SecureTrashPostconditionFailed {
-                path: path.to_path_buf(),
-            }),
-        },
+        Ok(_) => Err(CoreError::SecureTrashPostconditionFailed {
+            path: path.to_path_buf(),
+        }),
     }
 }
 
@@ -840,7 +829,8 @@ mod tests {
     use super::{
         identity_matches, map_disposition_error, map_trash_error, open_entry_with_access,
         open_error_path_with_source, open_secure_target, os_string_from_wide,
-        parse_directory_records, revalidate_shell_ancestor, shell_wide_path, AncestorSnapshot,
+        parse_directory_records, revalidate_shell_ancestor, revalidate_shell_target,
+        shell_wide_path, verify_shell_postcondition, AncestorSnapshot,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
@@ -1157,6 +1147,59 @@ mod tests {
             revalidate_shell_ancestor(&snapshot, &target),
             Err(CoreError::TargetReparsePoint { path }) if path == ancestor
         ));
+    }
+
+    #[test]
+    fn shell_revalidation_rejects_replaced_target_identity() {
+        let fixture = Fixture::new("revalidate-target");
+        let target = fixture.root.join("target");
+        fs::create_dir(&target).unwrap();
+        let expected = file_identity(&target).unwrap();
+        fs::rename(&target, fixture.root.join("original")).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("replacement.txt"), b"replacement").unwrap();
+
+        assert!(matches!(
+            revalidate_shell_target(&target, expected),
+            Err(CoreError::TargetIdentityChanged { path }) if path == target
+        ));
+        assert_eq!(
+            fs::read(target.join("replacement.txt")).unwrap(),
+            b"replacement"
+        );
+        assert!(fixture.root.join("original").exists());
+    }
+
+    #[test]
+    fn shell_postcondition_rejects_replacement_as_ambiguous() {
+        let fixture = Fixture::new("postcondition-replacement");
+        let target = fixture.root.join("target");
+        fs::create_dir(&target).unwrap();
+        let expected = file_identity(&target).unwrap();
+        fs::rename(&target, fixture.root.join("original")).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("replacement.txt"), b"replacement").unwrap();
+
+        assert!(matches!(
+            verify_shell_postcondition(&target, expected),
+            Err(CoreError::SecureTrashPostconditionFailed { path }) if path == target
+        ));
+        assert_eq!(
+            fs::read(target.join("replacement.txt")).unwrap(),
+            b"replacement"
+        );
+        assert!(fixture.root.join("original").exists());
+    }
+
+    #[test]
+    fn shell_postcondition_accepts_only_absent_original_path() {
+        let fixture = Fixture::new("postcondition-absent");
+        let target = fixture.root.join("target");
+        fs::create_dir(&target).unwrap();
+        let expected = file_identity(&target).unwrap();
+        fs::remove_dir(&target).unwrap();
+
+        assert!(verify_shell_postcondition(&target, expected).is_ok());
     }
 
     #[test]
