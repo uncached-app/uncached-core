@@ -311,19 +311,16 @@ unsafe extern "system" fn progress_sink_add_ref(raw: *mut c_void) -> u32 {
 
 unsafe extern "system" fn progress_sink_release(raw: *mut c_void) -> u32 {
     // SAFETY: raw is a live COM sink while Release is callable.
-    let sink = unsafe { &*raw.cast::<ProgressSink>() };
-    if sink
+    let remaining = unsafe { progress_sink_from_raw(raw) }
         .references
-        .fetch_sub(1, std::sync::atomic::Ordering::Release)
-        == 1
-    {
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+        - 1;
+    if remaining == 0 {
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
         // SAFETY: this was the final COM reference created by Box::into_raw.
         unsafe { drop(Box::from_raw(raw.cast::<ProgressSink>())) };
-        0
-    } else {
-        sink.references.load(std::sync::atomic::Ordering::Relaxed)
     }
+    remaining
 }
 
 unsafe extern "system" fn progress_sink_ok(_raw: *mut c_void) -> HRESULT {
@@ -1268,9 +1265,9 @@ mod tests {
     use super::{
         classify_trash_progress, identity_matches, map_disposition_error, map_trash_error,
         open_entry_with_access, open_error_path_with_source, open_secure_target,
-        os_string_from_wide, parse_directory_records, revalidate_shell_ancestor,
-        revalidate_shell_target, shell_wide_path, verify_shell_target_absent, AncestorSnapshot,
-        TrashProgressEvidence,
+        os_string_from_wide, parse_directory_records, progress_sink_add_ref, progress_sink_release,
+        revalidate_shell_ancestor, revalidate_shell_target, shell_wide_path,
+        verify_shell_target_absent, AncestorSnapshot, ProgressSink, TrashProgressEvidence,
     };
     use crate::error::CoreError;
     use crate::filesystem::file_identity;
@@ -1280,6 +1277,36 @@ mod tests {
     use std::mem::offset_of;
     use std::os::windows::ffi::OsStringExt;
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn progress_sink_release_handles_concurrent_final_releases() {
+        for _ in 0..256 {
+            let target = PathBuf::from("target");
+            let (sink, _) = ProgressSink::allocate(&target, std::ptr::null_mut());
+            // SAFETY: sink is live and owns its construction reference.
+            unsafe { progress_sink_add_ref(sink) };
+            let barrier = Arc::new(Barrier::new(3));
+            let first_barrier = Arc::clone(&barrier);
+            let second_barrier = Arc::clone(&barrier);
+            let sink_address = sink as usize;
+            let first = std::thread::spawn(move || {
+                first_barrier.wait();
+                // SAFETY: this thread releases one of two live COM references.
+                unsafe { progress_sink_release(sink_address as *mut std::ffi::c_void) }
+            });
+            let second = std::thread::spawn(move || {
+                second_barrier.wait();
+                // SAFETY: this thread releases one of two live COM references.
+                unsafe { progress_sink_release(sink_address as *mut std::ffi::c_void) }
+            });
+            barrier.wait();
+
+            let results = [first.join().unwrap(), second.join().unwrap()];
+            assert!(results.contains(&0));
+            assert!(results.contains(&1));
+        }
+    }
 
     #[test]
     fn directory_record_name_preserves_unpaired_utf16_units() {

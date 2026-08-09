@@ -36,3 +36,27 @@ Implementation complete from HEAD `89645c4`; final commit follows verification.
 - Shell callback evidence reduces but cannot eliminate the documented path/Shell namespace race; postcondition ambiguity remains fail-closed.
 - Windows runtime Trash coverage depends on Shell/Recycling Bin availability. `SecureTrashUnavailable` is reported explicitly and preserves target; operation failures are not skipped.
 - Isolated Cargo target directories may be needed if MSVC test artifacts are locked by another process.
+
+## ProgressSink Release Race Fix
+
+### Changes
+
+- Changed `progress_sink_release` to derive remaining references from one `fetch_sub(1, Ordering::AcqRel) - 1` result.
+- Removed the post-decrement `ProgressSink` access that could read `references` after another concurrent `Release` freed the object.
+- Preserved COM ABI, vtable wiring, final `Box::from_raw` free, and returned reference counts.
+- Added a Windows-only concurrent final-release regression test.
+
+### Verification
+
+- TDD RED: concurrent release test failed on current implementation because non-final `Release` could return an invalid count after final free.
+- TDD GREEN: focused concurrent release test passed.
+- Windows focused suite: 29 passed.
+- Full `cargo test`: 57 unit tests, 22 contract tests, 42 node_modules tests, 5 provider tests, doc tests passed.
+- `cargo fmt --all -- --check`: passed after formatting.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `git diff --check`: passed.
+
+### Scope
+
+- Core-only changes: `src/secure_cleanup/windows.rs` and this report.
+- No Desktop, CLI, config, or lockfile changes.
