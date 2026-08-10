@@ -202,14 +202,14 @@ mod tests {
             }
             Err(error) => panic!("Windows Trash cleanup failed: {error:?}"),
         }
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         {
             let report = result.unwrap();
             assert_eq!(report.freed_bytes, 7);
             assert!(!report.size_pending);
             assert!(!target_path.exists());
         }
-        #[cfg(not(any(windows, unix)))]
+        #[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
         {
             assert!(matches!(result, Err(CoreError::SecureTrashUnavailable)));
             assert!(target_path.is_dir());
@@ -242,14 +242,14 @@ mod tests {
             assert_eq!(report.freed_bytes, 7);
             assert!(!report.size_pending);
         }
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         {
             let report = result.unwrap();
             assert_eq!(report.freed_bytes, 7);
             assert!(!report.size_pending);
             assert!(!target_path.exists());
         }
-        #[cfg(not(any(windows, unix)))]
+        #[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
         {
             assert!(matches!(
                 result,

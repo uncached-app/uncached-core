@@ -1,6 +1,9 @@
 use crate::error::{CoreError, CoreResult};
+#[cfg(all(unix, not(target_os = "android")))]
 use crate::filesystem::file_identity;
-use crate::model::{FileIdentity, ScanTarget};
+#[cfg(all(unix, not(target_os = "android")))]
+use crate::model::FileIdentity;
+use crate::model::ScanTarget;
 use std::path::Path;
 
 #[cfg(windows)]
@@ -28,7 +31,7 @@ pub(crate) fn cleanup_capabilities() -> crate::contract::v1::CleanupCapabilities
     crate::contract::v1::CleanupCapabilities {
         permanent_cleanup: capabilities.permanent,
         move_to_trash: capabilities.trash,
-        secure_identity: cfg!(any(unix, windows)),
+        secure_identity: cfg!(any(windows, all(unix, not(target_os = "android")))),
     }
 }
 
@@ -41,7 +44,7 @@ fn backend_capabilities() -> CleanupCapabilities {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         CleanupCapabilities {
             permanent: true,
@@ -50,7 +53,7 @@ fn backend_capabilities() -> CleanupCapabilities {
     }
 
     // Platforms without a native secure cleanup backend remain unavailable.
-    #[cfg(not(any(windows, unix)))]
+    #[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
     {
         CleanupCapabilities {
             permanent: false,
@@ -63,7 +66,7 @@ fn backend_capabilities() -> CleanupCapabilities {
 enum BackendTarget {
     #[cfg(windows)]
     Windows(windows::WindowsTarget),
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     Unix {
         path: std::path::PathBuf,
         identity: FileIdentity,
@@ -84,7 +87,7 @@ impl SecureTarget {
         match self.backend {
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.delete_permanently(),
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "android")))]
             BackendTarget::Unix { path, identity } => {
                 verify_unix_identity(&path, identity)?;
                 std::fs::remove_dir_all(&path)
@@ -98,7 +101,7 @@ impl SecureTarget {
         match self.backend {
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.move_to_trash(),
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "android")))]
             BackendTarget::Unix { path, identity } => {
                 verify_unix_identity(&path, identity)?;
                 trash::delete(&path).map_err(|error| CoreError::SecureTrashOperationFailed {
@@ -112,7 +115,7 @@ impl SecureTarget {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn verify_unix_identity(path: &std::path::Path, expected: FileIdentity) -> CoreResult<()> {
     let actual = file_identity(path).ok_or_else(|| CoreError::TargetIdentityUnavailable {
         path: path.to_path_buf(),
@@ -165,7 +168,7 @@ pub(crate) fn open_secure_target(
         })
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         let _ = root;
         Ok(SecureTarget {
@@ -176,7 +179,7 @@ pub(crate) fn open_secure_target(
         })
     }
 
-    #[cfg(not(any(windows, unix)))]
+    #[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
     {
         let _ = root;
         Ok(SecureTarget {
@@ -283,11 +286,14 @@ mod tests {
 
         assert_eq!(public.permanent_cleanup, capabilities.permanent);
         assert_eq!(public.move_to_trash, capabilities.trash);
-        assert_eq!(public.secure_identity, cfg!(any(unix, windows)));
+        assert_eq!(
+            public.secure_identity,
+            cfg!(any(windows, all(unix, not(target_os = "android"))))
+        );
     }
 
     #[test]
-    #[cfg(not(any(windows, unix)))]
+    #[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
     fn unsupported_platform_refuses_before_touching_the_filesystem() {
         // The target path does not exist: reaching the filesystem would fail with
         // an open error instead of the typed capability errors asserted here.

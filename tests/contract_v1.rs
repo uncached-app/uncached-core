@@ -601,7 +601,7 @@ fn typed_trash_errors_have_stable_sanitized_contract_fields() {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
 #[test]
 fn unsupported_platform_capabilities_are_fail_closed() {
     assert_eq!(

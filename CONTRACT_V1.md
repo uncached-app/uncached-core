@@ -57,7 +57,7 @@ The following capability example is Windows-only:
 
 Linux and macOS report both cleanup capabilities as `true`. Android and unsupported platforms report both as `false`; `secure_trash_unavailable` is an explicit backend/environment result and must not be treated as successful cleanup. Capabilities are checked before a cleanup opens anything: on a platform without a backend the call fails with `secure_operation_unsupported` or `secure_trash_unavailable` without touching the target tree.
 
-`secureIdentity` is `true` wherever Core can read a stable filesystem identity, which today is every `unix` target and Windows.
+`secureIdentity` is `true` wherever Core can read a stable filesystem identity and has a supported secure cleanup backend. It is currently enabled for Windows, Linux, and macOS; Android and other unsupported targets report `false`.
 
 ### Measured platform verification
 
