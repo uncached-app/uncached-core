@@ -328,10 +328,10 @@ fn platform_and_capabilities_serialize_as_contract_values() {
 fn public_capabilities_reflect_current_secure_backend() {
     let capabilities = uncached_core::cleanup_capabilities();
 
-    let secure_identity_supported = cfg!(any(unix, windows));
+    let secure_identity_supported = cfg!(any(windows, all(unix, not(target_os = "android"))));
 
     assert_eq!(capabilities.secure_identity, secure_identity_supported);
-    let cleanup_supported = cfg!(any(unix, windows));
+    let cleanup_supported = cfg!(any(windows, all(unix, not(target_os = "android"))));
     assert_eq!(capabilities.permanent_cleanup, cleanup_supported);
     if !cleanup_supported {
         assert!(!capabilities.move_to_trash);
