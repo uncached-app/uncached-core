@@ -117,7 +117,9 @@ pub fn clean_to_trash(
     // Re-run policy after the target is pinned: the Trash backend releases its
     // verification handles before the Shell call, so the window is revalidated.
     validate_clean_policy(&policy.root, providers, &canonical)?;
-    secure_target.move_to_trash().map(|()| unmeasured_report())
+    secure_target
+        .move_to_trash()
+        .map(|()| clean_report_for(target))
 }
 
 pub fn clean_permanently(
@@ -131,15 +133,15 @@ pub fn clean_permanently(
     #[cfg(all(test, windows))]
     run_secure_target_hook();
     secure_target.delete_permanently()?;
-    Ok(unmeasured_report())
+    Ok(clean_report_for(target))
 }
 
-/// Secure cleanup deletes through retained handles and never walks the target
-/// for sizes, so the report says "not measured" instead of claiming an error.
-fn unmeasured_report() -> CleanReport {
+/// Secure cleanup does not walk the target after deletion. It reports the size
+/// already measured during scanning instead.
+fn clean_report_for(target: &ScanTarget) -> CleanReport {
     CleanReport {
-        freed_bytes: 0,
-        size_pending: true,
+        freed_bytes: target.size_bytes,
+        size_pending: false,
         size_has_errors: false,
     }
 }
@@ -189,7 +191,8 @@ mod tests {
         match result {
             Ok(report) => {
                 assert!(!target_path.exists());
-                assert!(report.size_pending);
+                assert_eq!(report.freed_bytes, 7);
+                assert!(!report.size_pending);
                 assert!(!report.size_has_errors);
             }
             Err(CoreError::SecureTrashUnavailable)
@@ -202,7 +205,8 @@ mod tests {
         #[cfg(unix)]
         {
             let report = result.unwrap();
-            assert!(report.size_pending);
+            assert_eq!(report.freed_bytes, 7);
+            assert!(!report.size_pending);
             assert!(!target_path.exists());
         }
         #[cfg(not(any(windows, unix)))]
@@ -235,12 +239,14 @@ mod tests {
         {
             let report = result.unwrap();
             assert!(!target_path.exists());
-            assert!(report.size_pending);
+            assert_eq!(report.freed_bytes, 7);
+            assert!(!report.size_pending);
         }
         #[cfg(unix)]
         {
             let report = result.unwrap();
-            assert!(report.size_pending);
+            assert_eq!(report.freed_bytes, 7);
+            assert!(!report.size_pending);
             assert!(!target_path.exists());
         }
         #[cfg(not(any(windows, unix)))]

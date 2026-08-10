@@ -106,8 +106,9 @@ pub struct FileIdentity {
     pub file_id: [u8; 16],
 }
 
-/// Outcome of a cleanup. Secure cleanup never measures the target, so
-/// `size_pending` distinguishes "not measured" from a failed measurement.
+/// Outcome of a cleanup. Secure cleanup reports the size measured during the
+/// scan, while `size_pending` distinguishes an unavailable size from a failed
+/// measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanReport {
     pub freed_bytes: u64,
