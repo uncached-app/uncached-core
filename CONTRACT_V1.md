@@ -117,6 +117,11 @@ object. Known values:
 NodeModules | CargoTarget | NextJs | Turbo | PyCache | Gradle | DotNetObj | Docker
 ```
 
+Wire recognition does not imply default scanner availability. `ProviderSet::all`
+currently registers scanners for `NodeModules`, `CargoTarget`, `NextJs`, `Turbo`,
+`PyCache`, and `Gradle`; `DotNetObj` and `Docker` are reserved wire categories
+until their scanners are implemented or explicitly configured by a consumer.
+
 A custom category serializes as `"Custom:<name>"` — for example
 `"Custom:docker-buildx"`. The name must be non-empty, contain no control
 characters, and be at most 128 UTF-8 bytes. Any other string is rejected on
