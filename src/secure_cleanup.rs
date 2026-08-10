@@ -171,10 +171,15 @@ pub(crate) fn open_secure_target(
     #[cfg(all(unix, not(target_os = "android")))]
     {
         let _ = root;
+        let identity = target
+            .identity
+            .ok_or_else(|| CoreError::TargetIdentityUnavailable {
+                path: target.path.clone(),
+            })?;
         Ok(SecureTarget {
             backend: BackendTarget::Unix {
                 path: target.path.clone(),
-                identity: target.identity.expect("identity checked above"),
+                identity,
             },
         })
     }
