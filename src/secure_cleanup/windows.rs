@@ -1244,6 +1244,20 @@ mod tests {
     }
 
     #[test]
+    fn empty_trash_target_returns_typed_initialization_error() {
+        let target = super::WindowsTarget {
+            _ancestors: Vec::new(),
+            entries: Vec::new(),
+            intent: CleanupIntent::Trash,
+        };
+
+        assert!(matches!(
+            target.move_to_trash(),
+            Err(CoreError::SecureTrashInitializationFailed { .. })
+        ));
+    }
+
+    #[test]
     fn directory_record_name_preserves_unpaired_utf16_units() {
         let name = os_string_from_wide(&[b'f' as u16, 0xd800, b'x' as u16]);
         assert_eq!(
