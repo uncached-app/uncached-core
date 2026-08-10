@@ -4,6 +4,7 @@ use crate::parallel::worker_pool;
 use jwalk::{Parallelism, WalkDir};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub fn canonical_workspace(root: &Path) -> CoreResult<PathBuf> {
     let metadata = fs::symlink_metadata(root)
@@ -74,12 +75,33 @@ fn size_parallelism() -> Parallelism {
 }
 
 pub fn directory_size_report(root: &Path) -> CoreResult<DirectorySizeReport> {
+    directory_size_report_with_cancel(root, &AtomicBool::new(false))?.ok_or_else(|| {
+        CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "directory sizing cancelled",
+        ))
+    })
+}
+
+/// Sizes a directory tree and returns `None` when cancellation is observed.
+/// Cancellation is checked before each entry is inspected, so callers do not
+/// have to wait for the remaining tree to be walked.
+pub fn directory_size_report_with_cancel(
+    root: &Path,
+    cancelled: &AtomicBool,
+) -> CoreResult<Option<DirectorySizeReport>> {
     WalkDir::new(root)
         .skip_hidden(false)
         .follow_links(false)
         .parallelism(size_parallelism())
         .into_iter()
         .try_fold(DirectorySizeReport::default(), |mut report, entry| {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "directory sizing cancelled",
+                ));
+            }
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
@@ -95,6 +117,14 @@ pub fn directory_size_report(root: &Path) -> CoreResult<DirectorySizeReport> {
                 Err(_) => report.errors = report.errors.saturating_add(1),
             }
             Ok(report)
+        })
+        .map(Some)
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                Ok(None)
+            } else {
+                Err(CoreError::Io(error))
+            }
         })
 }
 
@@ -241,7 +271,7 @@ mod tests {
     use super::{add_file_size, file_identity, DirectorySizeReport};
     use std::fs;
     use std::os::unix::fs::MetadataExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn file_identity_maps_unix_device_and_inode() {
@@ -283,6 +313,14 @@ mod tests {
         assert_eq!(report.bytes, u64::MAX);
         assert_eq!(report.errors, 1);
         assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn cancellable_sizing_stops_before_walking_when_requested() {
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let result = super::directory_size_report_with_cancel(Path::new("missing"), &cancelled);
+
+        assert!(result.unwrap().is_none());
     }
 
     fn unique_test_path() -> PathBuf {
