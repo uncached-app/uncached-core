@@ -11,7 +11,24 @@ pub fn canonical_workspace(root: &Path) -> CoreResult<PathBuf> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(CoreError::InvalidWorkspace(root.display().to_string()));
     }
-    fs::canonicalize(root).map_err(CoreError::from)
+    let canonical = fs::canonicalize(root).map_err(CoreError::from)?;
+    #[cfg(target_os = "linux")]
+    if is_protected_linux_workspace(&canonical) {
+        return Err(CoreError::InvalidWorkspace(canonical.display().to_string()));
+    }
+    Ok(canonical)
+}
+
+#[cfg(target_os = "linux")]
+fn is_protected_linux_workspace(path: &Path) -> bool {
+    path == Path::new("/")
+        || [
+            "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/root", "/run", "/sbin", "/sys",
+            "/usr", "/var",
+        ]
+        .iter()
+        .map(Path::new)
+        .any(|protected| path.starts_with(protected))
 }
 
 pub fn is_protected_directory(name: &str) -> bool {
@@ -239,6 +256,19 @@ mod tests {
         assert_eq!(identity.file_id[8..], [0; 8]);
 
         fs::remove_file(path).expect("test file should be removed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_system_workspaces_are_protected_without_blocking_home_projects() {
+        assert!(super::is_protected_linux_workspace(Path::new("/etc")));
+        assert!(super::is_protected_linux_workspace(Path::new("/usr/local")));
+        assert!(!super::is_protected_linux_workspace(Path::new(
+            "/home/user/project"
+        )));
+        assert!(!super::is_protected_linux_workspace(Path::new(
+            "/tmp/project"
+        )));
     }
 
     #[test]
