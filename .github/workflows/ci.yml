@@ -50,6 +50,10 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
+      - name: Run Linux Unix-cleanup smoke test
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --test node_modules public_clean_to_trash_fails_closed_without_mutating_target
+
       - name: Compile benches without running them
         run: cargo bench --bench pruning --features bench --no-run
 

@@ -292,6 +292,50 @@ mod tests {
         );
     }
 
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn unix_identity_mismatch_fails_closed_before_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "uncached-core-unix-identity-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = root.join("target");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("content.txt"), b"content").unwrap();
+
+        let wrong_identity = FileIdentity {
+            volume_serial: 0,
+            file_id: [0; 16],
+        };
+        let permanent = SecureTarget {
+            backend: BackendTarget::Unix {
+                path: path.clone(),
+                identity: wrong_identity,
+            },
+        };
+        assert!(matches!(
+            permanent.delete_permanently(),
+            Err(CoreError::TargetIdentityChanged { .. })
+        ));
+        assert!(path.is_dir());
+
+        let trash = SecureTarget {
+            backend: BackendTarget::Unix {
+                path: path.clone(),
+                identity: wrong_identity,
+            },
+        };
+        assert!(matches!(
+            trash.move_to_trash(),
+            Err(CoreError::TargetIdentityChanged { .. })
+        ));
+        assert!(path.is_dir());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     #[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
     fn unsupported_platform_refuses_before_touching_the_filesystem() {
