@@ -51,8 +51,22 @@ impl ProviderSet {
         }
     }
 
-    pub fn add_scanner(&mut self, scanner: impl Scanner + 'static) {
+    /// Adds a provider unless its category is already registered.
+    ///
+    /// Returns `true` when the provider was added and `false` when the existing
+    /// provider was kept. Category uniqueness makes lookup and classification
+    /// independent of insertion order.
+    pub fn add_scanner(&mut self, scanner: impl Scanner + 'static) -> bool {
+        let category = scanner.category();
+        if self
+            .scanners
+            .iter()
+            .any(|registered| registered.category() == category)
+        {
+            return false;
+        }
         self.scanners.push(Box::new(scanner));
+        true
     }
 
     pub fn free() -> Self {
