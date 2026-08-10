@@ -61,13 +61,13 @@ Linux and macOS report both cleanup capabilities as `true`. Android and unsuppor
 
 ### Measured platform verification
 
-The current Windows backend was verified on `x86_64-pc-windows-msvc`: `cargo
-test --all-features` passed 138 tests. The suite includes Recycle Bin success and
-abort handling, target identity and reparse-point rejection, callback and
-postcondition validation, concurrent final-release handling, replacement
-preservation, and permanent-delete behavior. `cargo check --target
-x86_64-unknown-linux-gnu --all-targets` also passed. No macOS runtime or compile
-result is claimed here when `x86_64-apple-darwin` is not installed.
+The CI matrix is configured to run `cargo test --all-features`, Clippy,
+formatting, and benchmark compilation on Linux, Windows, and macOS. The Windows
+backend includes tests for Recycle Bin success and abort handling, target
+identity and reparse-point rejection, callback and postcondition validation,
+concurrent final-release handling, replacement preservation, and permanent
+delete behavior. This document does not claim a local Windows execution; the
+platform-specific results are established by the corresponding CI job.
 
 ### Secure open scope and limits
 
