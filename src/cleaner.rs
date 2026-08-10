@@ -58,7 +58,11 @@ fn validate_clean_policy(
         });
     }
     if target.path.ancestors().any(|ancestor| {
-        fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        let is_symlink =
+            fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        is_symlink
+            && fs::canonicalize(ancestor)
+                .is_ok_and(|canonical_ancestor| is_within(&root, &canonical_ancestor))
     }) {
         return Err(CoreError::TargetReparsePoint {
             path: target.path.clone(),
