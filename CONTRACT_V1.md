@@ -270,7 +270,7 @@ inside `data`, not the envelope-level failure field. Core's `TargetFoundDto` is 
 domain shape for `scan:target_found`; Desktop wraps that shape in its
 Desktop-specific target-found DTO, adding `id`, `name`, `formattedSize`, and
 nullable `lastModified`. `scan:target_sized` carries `TargetSizedDto`. Core
-`CleanupResultDto` is the four-field command/domain result. Desktop
+`CleanupResultDto` is the five-field command/domain result. Desktop
 `clean:finished` uses a separate event DTO when it intentionally omits
 `targetPath`. Cleanup failure events carry an error envelope with null data.
 `clean:finished` is the shipped success name; `clean:success` is not part of
