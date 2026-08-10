@@ -608,7 +608,11 @@ impl WindowsTarget {
         // an unavailable Trash backend.
         let target = entries
             .first()
-            .expect("WindowsTarget must contain its verified target entry");
+            .ok_or_else(|| CoreError::SecureTrashInitializationFailed {
+                source: std::io::Error::other(
+                    "secure target did not retain its verified target entry",
+                ),
+            })?;
         let path = target.path.clone();
         let expected_identity = target.identity;
         let ancestor_snapshots: Vec<_> = ancestors
