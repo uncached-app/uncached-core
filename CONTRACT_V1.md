@@ -173,7 +173,7 @@ sizing state.
   "success": true,
   "targetPath": "C:\\workspace\\target",
   "freedBytes": 42,
-  "sizePending": true,
+  "sizePending": false,
   "sizeHasErrors": false
 }
 ```
@@ -181,11 +181,13 @@ sizing state.
 This Core DTO has exactly these five required fields. Desktop cleanup events
 intentionally use a separate event DTO and may omit `targetPath`.
 
-Secure cleanup deletes through retained handles and never walks the target for a
-size, so it reports `freedBytes: 0` with `sizePending: true` and
-`sizeHasErrors: false`. `sizePending` means "not measured"; `sizeHasErrors` means
-"measured, and the walk hit errors". A consumer that needs a freed-bytes figure
-measures before cleanup.
+Secure cleanup does not walk the target after deletion. It reports the
+`sizeBytes` measured during the settled scan as `freedBytes`, so a successful
+cleanup normally returns `sizePending: false`. This is an estimated reclaimed
+size based on the pre-cleanup scan, not a post-operation filesystem measurement.
+`sizePending` means "not measured"; `sizeHasErrors` means "measured, and the
+walk hit errors". Consumers must not treat `freedBytes` as an exact physical
+disk-space delta when the scan had sizing errors.
 
 ## Errors
 
