@@ -199,12 +199,15 @@ mod tests {
             }
             Err(error) => panic!("Windows Trash cleanup failed: {error:?}"),
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
-            assert!(
-                matches!(result, Err(CoreError::SecureTrashUnavailable)),
-                "unexpected result: {result:?}"
-            );
+            let report = result.unwrap();
+            assert!(report.size_pending);
+            assert!(!target_path.exists());
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            assert!(matches!(result, Err(CoreError::SecureTrashUnavailable)));
             assert!(target_path.is_dir());
             assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
         }
@@ -234,7 +237,13 @@ mod tests {
             assert!(!target_path.exists());
             assert!(report.size_pending);
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        {
+            let report = result.unwrap();
+            assert!(report.size_pending);
+            assert!(!target_path.exists());
+        }
+        #[cfg(not(any(windows, unix)))]
         {
             assert!(matches!(
                 result,
@@ -356,7 +365,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        root
+        fs::canonicalize(root).unwrap()
     }
 
     #[cfg(windows)]

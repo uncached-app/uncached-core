@@ -1,5 +1,6 @@
 use crate::error::{CoreError, CoreResult};
-use crate::model::ScanTarget;
+use crate::filesystem::file_identity;
+use crate::model::{FileIdentity, ScanTarget};
 use std::path::Path;
 
 #[cfg(windows)]
@@ -40,9 +41,16 @@ fn backend_capabilities() -> CleanupCapabilities {
         }
     }
 
-    // No non-Windows backend performs identity-preserving deletion yet, so every
-    // other platform reports both capabilities as unavailable.
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        CleanupCapabilities {
+            permanent: true,
+            trash: true,
+        }
+    }
+
+    // Platforms without a native secure cleanup backend remain unavailable.
+    #[cfg(not(any(windows, unix)))]
     {
         CleanupCapabilities {
             permanent: false,
@@ -55,9 +63,15 @@ fn backend_capabilities() -> CleanupCapabilities {
 enum BackendTarget {
     #[cfg(windows)]
     Windows(windows::WindowsTarget),
+    #[cfg(unix)]
+    Unix {
+        path: std::path::PathBuf,
+        identity: FileIdentity,
+    },
     /// Constructed on platforms without a secure backend, and by the tests that
     /// pin the unsupported-platform contract on every platform.
     #[cfg_attr(windows, allow(dead_code))]
+    #[allow(dead_code)]
     Unsupported,
 }
 
@@ -70,6 +84,12 @@ impl SecureTarget {
         match self.backend {
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.delete_permanently(),
+            #[cfg(unix)]
+            BackendTarget::Unix { path, identity } => {
+                verify_unix_identity(&path, identity)?;
+                std::fs::remove_dir_all(&path)
+                    .map_err(|source| CoreError::SecureDeletionFailed { path, source })
+            }
             BackendTarget::Unsupported => Err(permanent_cleanup_unsupported()),
         }
     }
@@ -78,9 +98,31 @@ impl SecureTarget {
         match self.backend {
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.move_to_trash(),
+            #[cfg(unix)]
+            BackendTarget::Unix { path, identity } => {
+                verify_unix_identity(&path, identity)?;
+                trash::delete(&path).map_err(|error| CoreError::SecureTrashOperationFailed {
+                    path,
+                    operation: "move_to_trash".to_owned(),
+                    source: std::io::Error::other(error.to_string()),
+                })
+            }
             BackendTarget::Unsupported => Err(CoreError::SecureTrashUnavailable),
         }
     }
+}
+
+#[cfg(unix)]
+fn verify_unix_identity(path: &std::path::Path, expected: FileIdentity) -> CoreResult<()> {
+    let actual = file_identity(path).ok_or_else(|| CoreError::TargetIdentityUnavailable {
+        path: path.to_path_buf(),
+    })?;
+    if actual != expected {
+        return Err(CoreError::TargetIdentityChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 fn permanent_cleanup_unsupported() -> CoreError {
@@ -123,7 +165,18 @@ pub(crate) fn open_secure_target(
         })
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        let _ = root;
+        Ok(SecureTarget {
+            backend: BackendTarget::Unix {
+                path: target.path.clone(),
+                identity: target.identity.expect("identity checked above"),
+            },
+        })
+    }
+
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = root;
         Ok(SecureTarget {
@@ -140,6 +193,7 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    #[allow(dead_code)]
     fn target() -> ScanTarget {
         ScanTarget::new(PathBuf::from("target"), Category::NodeModules, 0).with_identity(Some(
             FileIdentity {
@@ -233,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, unix)))]
     fn unsupported_platform_refuses_before_touching_the_filesystem() {
         // The target path does not exist: reaching the filesystem would fail with
         // an open error instead of the typed capability errors asserted here.

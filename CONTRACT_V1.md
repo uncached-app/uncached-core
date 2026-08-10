@@ -41,9 +41,9 @@ All fields below are serialized with the shown camelCase names.
 }
 ```
 
-`permanentCleanup` and `moveToTrash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection. `moveToTrash: true` is Windows-specific in v1; non-Windows examples and implementations must report `false`.
+`permanentCleanup` and `moveToTrash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection. Unix targets use the platform Trash integration supplied by the `trash` crate and revalidate the recorded filesystem identity immediately before cleanup.
 
-Permanent cleanup is handle-based and provides stronger identity guarantees. On Windows, Trash uses Shell `IFileOperation` with revalidation before and after releasing verification handles. Success additionally requires an `IFileOperationProgressSink::PostDeleteItem` callback for the expected target with a successful HRESULT, no operation abort, and passing postcondition checks. External deletion without that callback returns `secure_trash_postcondition_failed`, not success. This leaves a residual Shell namespace race after callback evidence and postcondition checks that cannot be made handle-atomic; ambiguous results fail closed. A `moveToTrash` capability of `true` means the Windows backend is available, not that every target operation will succeed.
+Permanent cleanup is identity-checked immediately before deletion. On Windows, Trash uses Shell `IFileOperation` with revalidation before and after releasing verification handles. Success additionally requires an `IFileOperationProgressSink::PostDeleteItem` callback for the expected target with a successful HRESULT, no operation abort, and passing postcondition checks. External deletion without that callback returns `secure_trash_postcondition_failed`, not success. Unix cleanup uses the same recorded-identity revalidation followed by the platform filesystem or Trash operation; it does not claim Windows handle-atomic guarantees. A cleanup capability of `true` means the backend is available, not that every target operation will succeed.
 
 The following capability example is Windows-only:
 
@@ -55,7 +55,7 @@ The following capability example is Windows-only:
 }
 ```
 
-On Linux, macOS, Android, and unsupported platforms, both `permanentCleanup` and `moveToTrash` are `false`; `secure_trash_unavailable` is an explicit backend/environment result and must not be treated as successful cleanup. Capabilities are checked before a cleanup opens anything: on a platform without a backend the call fails with `secure_operation_unsupported` or `secure_trash_unavailable` without touching the target tree.
+Linux and macOS report both cleanup capabilities as `true`. Android and unsupported platforms report both as `false`; `secure_trash_unavailable` is an explicit backend/environment result and must not be treated as successful cleanup. Capabilities are checked before a cleanup opens anything: on a platform without a backend the call fails with `secure_operation_unsupported` or `secure_trash_unavailable` without touching the target tree.
 
 `secureIdentity` is `true` wherever Core can read a stable filesystem identity, which today is every `unix` target and Windows.
 

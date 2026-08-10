@@ -331,8 +331,9 @@ fn public_capabilities_reflect_current_secure_backend() {
     let secure_identity_supported = cfg!(any(unix, windows));
 
     assert_eq!(capabilities.secure_identity, secure_identity_supported);
-    assert_eq!(capabilities.permanent_cleanup, cfg!(windows));
-    if !cfg!(windows) {
+    let cleanup_supported = cfg!(any(unix, windows));
+    assert_eq!(capabilities.permanent_cleanup, cleanup_supported);
+    if !cleanup_supported {
         assert!(!capabilities.move_to_trash);
     }
 
@@ -340,7 +341,7 @@ fn public_capabilities_reflect_current_secure_backend() {
     assert_eq!(
         value,
         json!({
-            "permanentCleanup": cfg!(windows),
+            "permanentCleanup": cleanup_supported,
             "moveToTrash": capabilities.move_to_trash,
             "secureIdentity": secure_identity_supported,
         })
