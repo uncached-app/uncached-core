@@ -21,8 +21,27 @@ pub fn is_protected_directory(name: &str) -> bool {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DirectorySizeReport {
+    /// Sum of file sizes that were read successfully.
     pub bytes: u64,
+    /// Number of entries that could not be read, or size additions that overflowed.
     pub errors: u64,
+}
+
+impl DirectorySizeReport {
+    /// Returns whether every entry contributed to the reported size.
+    pub fn is_complete(&self) -> bool {
+        self.errors == 0
+    }
+}
+
+fn add_file_size(report: &mut DirectorySizeReport, bytes: u64) {
+    if let Some(total) = report.bytes.checked_add(bytes) {
+        report.bytes = total;
+    } else {
+        // Keep the partial total bounded, but make the loss visible to callers.
+        report.bytes = u64::MAX;
+        report.errors = report.errors.saturating_add(1);
+    }
 }
 
 fn size_parallelism() -> Parallelism {
@@ -47,16 +66,16 @@ pub fn directory_size_report(root: &Path) -> CoreResult<DirectorySizeReport> {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
-                    report.errors += 1;
+                    report.errors = report.errors.saturating_add(1);
                     return Ok(report);
                 }
             };
             match entry.metadata() {
                 Ok(metadata) if metadata.is_file() => {
-                    report.bytes = report.bytes.saturating_add(metadata.len());
+                    add_file_size(&mut report, metadata.len());
                 }
                 Ok(_) => {}
-                Err(_) => report.errors += 1,
+                Err(_) => report.errors = report.errors.saturating_add(1),
             }
             Ok(report)
         })
@@ -202,7 +221,7 @@ fn windows_file_identity(path: &Path) -> Option<FileIdentity> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::file_identity;
+    use super::{add_file_size, file_identity, DirectorySizeReport};
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     use std::path::PathBuf;
@@ -220,6 +239,20 @@ mod tests {
         assert_eq!(identity.file_id[8..], [0; 8]);
 
         fs::remove_file(path).expect("test file should be removed");
+    }
+
+    #[test]
+    fn sizing_report_marks_partial_results_and_overflow() {
+        let mut report = DirectorySizeReport {
+            bytes: u64::MAX,
+            errors: 0,
+        };
+
+        add_file_size(&mut report, 1);
+
+        assert_eq!(report.bytes, u64::MAX);
+        assert_eq!(report.errors, 1);
+        assert!(!report.is_complete());
     }
 
     fn unique_test_path() -> PathBuf {
