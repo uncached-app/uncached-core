@@ -1,8 +1,13 @@
 use super::CleanupIntent;
 mod directory_parser;
+mod handles;
 use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 use directory_parser::{os_string_from_wide, parse_directory_records};
+use handles::{
+    identity_from_handle, identity_matches, open_directory, open_entry, open_entry_with_handle,
+    wide_path, AccessProfile, Entry, Handle,
+};
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
@@ -10,23 +15,18 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ffi::OsString;
 use std::marker::PhantomData;
-use std::mem::{offset_of, size_of, MaybeUninit};
+use std::mem::{offset_of, size_of};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use windows_sys::core::{GUID, HRESULT};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
-    INVALID_HANDLE_VALUE,
+    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, FileIdExtdDirectoryInfo, GetFileInformationByHandleEx,
-    SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAG_POSIX_SEMANTICS, FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    FileIdExtdDirectoryInfo, GetFileInformationByHandleEx, SetFileInformationByHandle, DELETE,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_ID_EXTD_DIR_INFO,
 };
 use windows_sys::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -520,30 +520,6 @@ impl Drop for ComApartment {
         // SAFETY: this guard owns successful COM initialization on current thread.
         unsafe { CoUninitialize() };
     }
-}
-
-#[derive(Debug)]
-struct Handle(HANDLE);
-
-// SAFETY: a file `HANDLE` is a process-wide kernel value with no thread
-// affinity, and `Handle` owns it exclusively, so moving one between threads
-// cannot alias or invalidate it. Only COM interfaces are apartment-bound, and
-// none are represented by this type.
-unsafe impl Send for Handle {}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        // SAFETY: Handle owns a successful CreateFileW result.
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
-#[derive(Debug)]
-struct Entry {
-    handle: Handle,
-    is_directory: bool,
-    identity: FileIdentity,
-    path: PathBuf,
 }
 
 /// Ancestors are held open only so their handles keep the path pinned while the
@@ -1103,163 +1079,6 @@ fn push_entry(
     Ok(())
 }
 
-/// How much access a secure open needs from an entry.
-///
-/// Requesting `DELETE` makes the open fail with a sharing violation whenever any
-/// other process holds the entry open without delete sharing — a directory that
-/// is some process's working directory, an editor, a running build. That price
-/// is unavoidable where the handle is the deletion mechanism, and pointless
-/// everywhere else, so it is only paid where it buys something.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccessProfile {
-    /// The handle will delete the entry: needs `DELETE`, and enumeration rights
-    /// for directories so the subtree can be walked.
-    Delete,
-    /// The handle only pins the entry and reads its identity. Attribute access
-    /// is exempt from share-mode conflicts, so this succeeds on entries other
-    /// processes are using.
-    Inspect,
-}
-
-fn open_directory(path: &Path, display: &Path, access: AccessProfile) -> CoreResult<Entry> {
-    let entry = open_entry(path, display, access)?;
-    if !entry.is_directory {
-        return Err(open_error_path(
-            display,
-            "path component is not a directory",
-        ));
-    }
-    Ok(entry)
-}
-
-fn open_entry(path: &Path, display: &Path, access: AccessProfile) -> CoreResult<Entry> {
-    let wide = wide_path(path);
-    let open = |access| {
-        // SAFETY: wide is NUL-terminated; all other arguments are fixed valid flags.
-        unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                access,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS
-                    | FILE_FLAG_OPEN_REPARSE_POINT
-                    | FILE_FLAG_POSIX_SEMANTICS,
-                std::ptr::null_mut(),
-            )
-        }
-    };
-
-    if access == AccessProfile::Inspect {
-        let handle = open(FILE_READ_ATTRIBUTES);
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(CoreError::SecureTargetOpenFailed {
-                path: display.to_path_buf(),
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        // Nothing enumerates through an inspect handle, so there is no
-        // enumeration requirement to enforce.
-        return open_entry_with_handle(handle, path, display, true, None);
-    }
-
-    // FILE_LIST_DIRECTORY is required for directory enumeration but is not a
-    // valid desired access for every regular-file provider.
-    let handle = open(DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY);
-    if handle != INVALID_HANDLE_VALUE {
-        return open_entry_with_handle(handle, path, display, true, None);
-    }
-    let required_access_error = std::io::Error::last_os_error();
-    let handle = open(DELETE | FILE_READ_ATTRIBUTES);
-    if handle != INVALID_HANDLE_VALUE {
-        return open_entry_with_handle(handle, path, display, false, Some(required_access_error));
-    }
-    Err(CoreError::SecureTargetOpenFailed {
-        path: display.to_path_buf(),
-        source: std::io::Error::last_os_error(),
-    })
-}
-
-fn open_entry_with_handle(
-    handle: HANDLE,
-    path: &Path,
-    display: &Path,
-    can_enumerate: bool,
-    required_access_error: Option<std::io::Error>,
-) -> CoreResult<Entry> {
-    let handle = Handle(handle);
-    let attributes = attributes_from_handle(handle.0, display)?;
-    if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes.ReparseTag != 0 {
-        return Err(CoreError::TargetReparsePoint {
-            path: display.to_path_buf(),
-        });
-    }
-    let is_directory = attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    if is_directory && !can_enumerate {
-        return Err(open_error_path_with_source(
-            display,
-            "directory handle lacks enumeration access",
-            required_access_error,
-        ));
-    }
-    let identity = identity_from_handle(handle.0, display)?;
-    Ok(Entry {
-        is_directory,
-        identity,
-        handle,
-        path: path.to_path_buf(),
-    })
-}
-
-fn attributes_from_handle(handle: HANDLE, path: &Path) -> CoreResult<FILE_ATTRIBUTE_TAG_INFO> {
-    let mut info = MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::zeroed();
-    // SAFETY: buffer is valid writable storage of the requested class size.
-    if unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileAttributeTagInfo,
-            info.as_mut_ptr() as *mut c_void,
-            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(CoreError::SecureHandleQueryFailed {
-            path: path.to_path_buf(),
-            operation: "attributes",
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    // SAFETY: successful API call initialized buffer.
-    Ok(unsafe { info.assume_init() })
-}
-
-fn identity_from_handle(handle: HANDLE, path: &Path) -> CoreResult<FileIdentity> {
-    let mut info = MaybeUninit::<FILE_ID_INFO>::zeroed();
-    // SAFETY: buffer is valid writable storage of the requested class size.
-    if unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            windows_sys::Win32::Storage::FileSystem::FileIdInfo,
-            info.as_mut_ptr() as *mut c_void,
-            size_of::<FILE_ID_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(CoreError::SecureHandleQueryFailed {
-            path: path.to_path_buf(),
-            operation: "identity",
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    // SAFETY: successful API call initialized buffer.
-    let info = unsafe { info.assume_init() };
-    Ok(FileIdentity {
-        volume_serial: info.VolumeSerialNumber,
-        file_id: info.FileId.Identifier,
-    })
-}
-
 fn enumerate_directory(
     handle: HANDLE,
     display: &Path,
@@ -1332,13 +1151,6 @@ fn map_disposition_error(path: &Path, source: std::io::Error) -> CoreError {
     }
 }
 
-fn wide_path(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 fn shell_wide_path(path: &Path) -> Vec<u16> {
     let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
     let extended_prefix = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
@@ -1356,14 +1168,6 @@ fn shell_wide_path(path: &Path) -> Vec<u16> {
         wide
     };
     path.into_iter().chain(std::iter::once(0)).collect()
-}
-
-fn os_string_from_wide(name: &[u16]) -> OsString {
-    OsString::from_wide(name)
-}
-
-fn identity_matches(enumerated: FileIdentity, opened: FileIdentity) -> bool {
-    enumerated == opened
 }
 
 fn open_error(target: &ScanTarget, message: &str) -> CoreError {
