@@ -10,6 +10,8 @@ bench = []
 jwalk = "0.8"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0"
+
+[target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
 trash = "5.2"
 
 [target.'cfg(windows)'.dependencies]
