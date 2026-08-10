@@ -982,10 +982,12 @@ pub(super) fn open_secure_target(
         // traverse reparse points inside it.
         CleanupIntent::Trash => entries.push(target_entry),
     }
-    assert!(
-        !entries.is_empty(),
-        "secure open must retain the verified target entry"
-    );
+    if entries.is_empty() {
+        return Err(CoreError::SecureTargetOpenFailed {
+            path: target.path.clone(),
+            source: std::io::Error::other("secure open did not retain the verified target entry"),
+        });
+    }
     Ok(WindowsTarget {
         _ancestors: ancestors,
         entries,
