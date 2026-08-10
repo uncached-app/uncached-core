@@ -118,7 +118,9 @@ NodeModules | CargoTarget | NextJs | Turbo | PyCache | Gradle | DotNetObj | Dock
 ```
 
 A custom category serializes as `"Custom:<name>"` — for example
-`"Custom:docker-buildx"`. Any other string is rejected on deserialization.
+`"Custom:docker-buildx"`. The name must be non-empty, contain no control
+characters, and be at most 128 UTF-8 bytes. Any other string is rejected on
+deserialization.
 
 ### Core `TargetFoundDto`
 

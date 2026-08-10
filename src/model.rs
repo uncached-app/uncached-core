@@ -49,12 +49,25 @@ impl Category {
             "Gradle" => Self::Gradle,
             "DotNetObj" => Self::DotNetObj,
             "Docker" => Self::Docker,
-            _ => Self::Custom(value.strip_prefix(CUSTOM_CATEGORY_PREFIX)?.to_owned()),
+            _ => {
+                let name = value.strip_prefix(CUSTOM_CATEGORY_PREFIX)?;
+                if !valid_custom_category_name(name) {
+                    return None;
+                }
+                Self::Custom(name.to_owned())
+            }
         })
     }
 }
 
 const CUSTOM_CATEGORY_PREFIX: &str = "Custom:";
+const MAX_CUSTOM_CATEGORY_NAME_BYTES: usize = 128;
+
+fn valid_custom_category_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_CUSTOM_CATEGORY_NAME_BYTES
+        && !name.chars().any(char::is_control)
+}
 
 impl Serialize for Category {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -193,6 +206,18 @@ mod tests {
     fn unknown_category_strings_are_rejected() {
         assert!(serde_json::from_value::<Category>(json!("Whatever")).is_err());
         assert!(Category::from_wire("Whatever").is_none());
+    }
+
+    #[test]
+    fn custom_category_wire_names_require_bounded_printable_content() {
+        assert!(Category::from_wire("Custom:docker-buildx").is_some());
+        assert!(Category::from_wire("Custom:").is_none());
+        assert!(Category::from_wire("Custom:line\nfeed").is_none());
+        assert!(Category::from_wire(&format!(
+            "Custom:{}",
+            "x".repeat(super::MAX_CUSTOM_CATEGORY_NAME_BYTES + 1)
+        ))
+        .is_none());
     }
 
     #[test]
