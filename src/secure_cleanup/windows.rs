@@ -5,9 +5,11 @@ use crate::error::{CoreError, CoreResult};
 use crate::model::{FileIdentity, ScanTarget};
 use directory_parser::{os_string_from_wide, parse_directory_records};
 use handles::{
-    identity_from_handle, identity_matches, open_directory, open_entry, open_entry_with_handle,
-    wide_path, AccessProfile, Entry, Handle,
+    identity_from_handle, identity_matches, open_directory, open_entry, AccessProfile, Entry,
+    Handle,
 };
+#[cfg(test)]
+use handles::{open_entry_with_handle, wide_path};
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
@@ -15,7 +17,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ffi::OsString;
 use std::marker::PhantomData;
-use std::mem::{offset_of, size_of};
+use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,9 +26,9 @@ use windows_sys::Win32::Foundation::{
     ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileIdExtdDirectoryInfo, GetFileInformationByHandleEx, SetFileInformationByHandle, DELETE,
+    FileIdExtdDirectoryInfo, GetFileInformationByHandleEx, SetFileInformationByHandle,
     FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_ID_EXTD_DIR_INFO,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX,
 };
 use windows_sys::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
