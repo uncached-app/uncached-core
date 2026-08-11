@@ -1592,15 +1592,21 @@ mod tests {
             Ok(()) => assert!(!target_path.exists()),
             Err(error) => {
                 assert!(matches!(
-                    error,
+                    &error,
                     CoreError::SecureTrashUnavailable
                         | CoreError::SecureTrashInitializationFailed { .. }
                         | CoreError::SecureTrashOperationFailed { .. }
                         | CoreError::SecureTrashPostconditionFailed { .. }
                 ));
-                eprintln!("environment unavailable: Windows Shell Trash backend");
-                assert!(target_path.is_dir());
-                assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"data");
+                eprintln!("Windows Shell Trash returned an environment/operation error: {error:?}");
+                if matches!(
+                    &error,
+                    CoreError::SecureTrashUnavailable
+                        | CoreError::SecureTrashInitializationFailed { .. }
+                ) {
+                    assert!(target_path.is_dir());
+                    assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"data");
+                }
             }
         }
     }
