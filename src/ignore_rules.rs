@@ -151,6 +151,16 @@ fn compile_pattern(pattern: &str, home: Option<&Path>) -> Result<Vec<Glob>, Stri
         None => pattern.to_owned(),
     };
 
+    // A pasted path may travel through a symlink — `/var` is `/private/var` on
+    // macOS, and a scan reports the resolved form. Resolving the rule too is
+    // what keeps a path the user copied from their own terminal from silently
+    // matching nothing. Only plain paths are resolved: a pattern with glob
+    // syntax is not a path, and one that does not exist yet stays as typed.
+    let expanded = match resolve_plain_path(&expanded) {
+        Some(resolved) => resolved,
+        None => expanded,
+    };
+
     // A pattern with no separator matches by name at any depth; one with a
     // separator is anchored, and here the anchor is the filesystem root.
     let anchored = expanded.contains('/');
@@ -170,6 +180,24 @@ fn compile_pattern(pattern: &str, home: Option<&Path>) -> Result<Vec<Glob>, Stri
             })
         })
         .collect()
+}
+
+fn resolve_plain_path(pattern: &str) -> Option<String> {
+    // Absolute only. A bare name like `target` is a name, not a path, and
+    // resolving it would silently anchor the rule to whichever directory the
+    // process happens to be running in — turning "any target directory" into
+    // "this one".
+    if !Path::new(pattern).is_absolute() {
+        return None;
+    }
+    if pattern.contains(['*', '?', '[', ']', '{', '}']) {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(pattern).ok()?;
+    let text = canonical.to_str()?.to_owned();
+    // A resolved path carrying glob syntax of its own would change what the
+    // rule means, so keep the literal the user wrote instead.
+    (!text.contains(['*', '?', '[', ']', '{', '}'])).then_some(text)
 }
 
 #[cfg(test)]
@@ -227,6 +255,51 @@ mod tests {
         assert!(rules.excludes(Path::new("/home/user/Library/Caches/Homebrew")));
         assert!(rules.excludes(Path::new("/home/user/Library/Caches/Homebrew/downloads")));
         assert!(!rules.excludes(Path::new("/home/other/Library/Caches/Homebrew")));
+    }
+
+    /// A path copied from the user's own terminal can travel through a
+    /// symlink — `/var` is `/private/var` on macOS — while a scan reports the
+    /// resolved form. Left unresolved, such a rule compiles cleanly, counts
+    /// towards "2 rules in force" and protects nothing.
+    #[test]
+    fn a_pasted_path_that_travels_through_a_symlink_still_matches() {
+        let real = std::env::temp_dir().join("uncached-ignore-real");
+        let link = std::env::temp_dir().join("uncached-ignore-link");
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_file(&link);
+        std::fs::create_dir_all(real.join("node_modules")).expect("fixture should be created");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).expect("symlink should be created");
+        #[cfg(not(unix))]
+        return;
+
+        // The rule is written with the link; a scan reports what traversal
+        // canonicalized, so that is what it has to match.
+        let scanned = real
+            .canonicalize()
+            .expect("fixture should resolve")
+            .join("node_modules");
+        let (rules, errors) = IgnoreRules::compile(&link.to_string_lossy(), None);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            rules.excludes(&scanned),
+            "a rule written through the link must cover the resolved path"
+        );
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
+    }
+
+    /// The mistake the fix above invites: resolving a bare name against the
+    /// process's working directory would turn "any vendor directory" into
+    /// "the one next to wherever the app was launched from".
+    #[test]
+    fn a_bare_name_is_never_resolved_against_the_working_directory() {
+        let rules = rules("target");
+
+        assert!(rules.excludes(Path::new("/somewhere/else/target")));
+        assert!(rules.excludes(Path::new("/another/project/target")));
     }
 
     #[test]
