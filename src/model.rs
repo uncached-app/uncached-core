@@ -17,6 +17,19 @@ pub enum Category {
     Gradle,
     DotNetObj,
     Docker,
+    XcodeDerivedData,
+    SwiftBuild,
+    DartTool,
+    /// A registry, store or download cache shared by every project on the
+    /// machine. Distinct from an artifact because emptying it also slows down
+    /// every future restore, which is the opposite of what a cleaner is for.
+    PackageManagerCache,
+    /// State written by an AI coding tool. Its own directory usually mixes
+    /// disposable scratch with configuration and history, so only proven
+    /// subpaths ever appear under this category.
+    AiToolCache,
+    /// Indexes and caches written by an editor or IDE.
+    EditorCache,
     Custom(String),
 }
 
@@ -33,6 +46,12 @@ impl Category {
             Self::Gradle => "Gradle".to_owned(),
             Self::DotNetObj => "DotNetObj".to_owned(),
             Self::Docker => "Docker".to_owned(),
+            Self::XcodeDerivedData => "XcodeDerivedData".to_owned(),
+            Self::SwiftBuild => "SwiftBuild".to_owned(),
+            Self::DartTool => "DartTool".to_owned(),
+            Self::PackageManagerCache => "PackageManagerCache".to_owned(),
+            Self::AiToolCache => "AiToolCache".to_owned(),
+            Self::EditorCache => "EditorCache".to_owned(),
             Self::Custom(name) => format!("{CUSTOM_CATEGORY_PREFIX}{name}"),
         }
     }
@@ -54,6 +73,12 @@ impl Category {
             "Gradle" => Self::Gradle,
             "DotNetObj" => Self::DotNetObj,
             "Docker" => Self::Docker,
+            "XcodeDerivedData" => Self::XcodeDerivedData,
+            "SwiftBuild" => Self::SwiftBuild,
+            "DartTool" => Self::DartTool,
+            "PackageManagerCache" => Self::PackageManagerCache,
+            "AiToolCache" => Self::AiToolCache,
+            "EditorCache" => Self::EditorCache,
             _ => {
                 let name = value.strip_prefix(CUSTOM_CATEGORY_PREFIX)?;
                 if !valid_custom_category_name(name) {
@@ -204,6 +229,12 @@ mod tests {
             (Category::Gradle, "Gradle"),
             (Category::DotNetObj, "DotNetObj"),
             (Category::Docker, "Docker"),
+            (Category::XcodeDerivedData, "XcodeDerivedData"),
+            (Category::SwiftBuild, "SwiftBuild"),
+            (Category::DartTool, "DartTool"),
+            (Category::PackageManagerCache, "PackageManagerCache"),
+            (Category::AiToolCache, "AiToolCache"),
+            (Category::EditorCache, "EditorCache"),
         ] {
             assert_eq!(serde_json::to_value(&category).unwrap(), json!(expected));
             assert_eq!(Category::from_wire(expected), Some(category));

@@ -1,6 +1,7 @@
 pub mod cleaner;
 pub mod confidence;
 pub mod contract;
+pub mod discovery;
 pub mod error;
 pub mod filesystem;
 pub mod model;
@@ -14,11 +15,15 @@ pub use cleaner::{clean_permanently, clean_to_trash, validate_clean_target};
 pub use confidence::{
     assess, collect_signals, Confidence, ConfidenceInput, ConfidenceLevel, ConfidenceSignal,
 };
+pub use discovery::{
+    home_directory, known_locations, probe_home, Discovery, KnownLocation, LocationKind,
+};
 pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
 pub use model::{Category, CleanReport, FileIdentity, ScanTarget, TraversalOutcome};
 pub use scanner::{
-    traverse_workspace, CargoTargetScanner, GradleScanner, NextCacheScanner, NodeModulesScanner,
-    ProviderSet, PyCacheScanner, Scanner, TraversalControl, TraversalEntry, TurboCacheScanner,
+    traverse_workspace, CargoTargetScanner, DartToolScanner, DotNetObjScanner, GradleScanner,
+    NextCacheScanner, NodeModulesScanner, ProviderSet, PyCacheScanner, Scanner, SwiftBuildScanner,
+    TraversalControl, TraversalEntry, TurboCacheScanner, XcodeDerivedDataScanner,
 };
 
 pub fn cleanup_capabilities() -> contract::v1::CleanupCapabilities {

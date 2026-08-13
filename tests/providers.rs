@@ -32,9 +32,8 @@ fn categories(root: &Path, providers: &ProviderSet) -> Vec<Category> {
 }
 
 #[test]
-fn all_registers_six_scanners_in_deterministic_order() {
+fn all_registers_every_scanner_in_deterministic_order() {
     let providers = ProviderSet::all();
-    assert_eq!(providers.len(), 6);
 
     let expected = [
         Category::NodeModules,
@@ -43,7 +42,12 @@ fn all_registers_six_scanners_in_deterministic_order() {
         Category::Turbo,
         Category::PyCache,
         Category::Gradle,
+        Category::XcodeDerivedData,
+        Category::SwiftBuild,
+        Category::DotNetObj,
+        Category::DartTool,
     ];
+    assert_eq!(providers.len(), expected.len());
     assert_eq!(providers.categories().collect::<Vec<_>>(), expected);
     assert_eq!(ProviderSet::free().len(), 1);
     assert!(ProviderSet::free()
@@ -110,6 +114,67 @@ fn all_scanners_require_expected_context_and_reject_bare_cargo_target() {
         1
     );
 
+    let _ = fs::remove_dir_all(root);
+}
+
+/// `bin`, `obj` and `build` are the most reused directory names in this whole
+/// catalogue, so their providers are the ones where a missing context check
+/// would be most destructive. Each valid case here has an invalid twin.
+#[test]
+fn ecosystem_providers_match_only_beside_their_project_file() {
+    let root = fixture();
+
+    fs::create_dir_all(root.join("xcode-valid/DerivedData")).unwrap();
+    fs::create_dir_all(root.join("xcode-valid/App.xcodeproj")).unwrap();
+    fs::create_dir_all(root.join("xcode-workspace/build")).unwrap();
+    fs::create_dir_all(root.join("xcode-workspace/App.xcworkspace")).unwrap();
+    fs::create_dir_all(root.join("plain-build/build")).unwrap();
+    fs::create_dir_all(root.join("plain-derived/DerivedData")).unwrap();
+
+    fs::create_dir_all(root.join("swift-valid/.build")).unwrap();
+    fs::write(root.join("swift-valid/Package.swift"), b"// swift-tools").unwrap();
+    fs::create_dir_all(root.join("swift-invalid/.build")).unwrap();
+
+    fs::create_dir_all(root.join("dotnet-valid/obj")).unwrap();
+    fs::create_dir_all(root.join("dotnet-valid/bin")).unwrap();
+    fs::write(root.join("dotnet-valid/App.csproj"), b"<Project />").unwrap();
+    fs::create_dir_all(root.join("dotnet-invalid/obj")).unwrap();
+    fs::create_dir_all(root.join("dotnet-invalid/bin")).unwrap();
+
+    fs::create_dir_all(root.join("flutter-valid/.dart_tool")).unwrap();
+    fs::write(root.join("flutter-valid/pubspec.yaml"), b"name: app").unwrap();
+    fs::create_dir_all(root.join("flutter-invalid/.dart_tool")).unwrap();
+
+    let mut found = Vec::new();
+    let cancelled = AtomicBool::new(false);
+    traverse_workspace(
+        &root,
+        &ProviderSet::all(),
+        &cancelled,
+        |entry| match entry.category.clone() {
+            Some(category) => {
+                found.push((entry.path.clone(), category));
+                TraversalControl::Prune
+            }
+            None => TraversalControl::Continue,
+        },
+    )
+    .unwrap();
+
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    let expected = [
+        ("dotnet-valid/bin", Category::DotNetObj),
+        ("dotnet-valid/obj", Category::DotNetObj),
+        ("flutter-valid/.dart_tool", Category::DartTool),
+        ("swift-valid/.build", Category::SwiftBuild),
+        ("xcode-valid/DerivedData", Category::XcodeDerivedData),
+        ("xcode-workspace/build", Category::XcodeDerivedData),
+    ]
+    .into_iter()
+    .map(|(path, category)| (fs::canonicalize(root.join(path)).unwrap(), category))
+    .collect::<Vec<_>>();
+
+    assert_eq!(found, expected);
     let _ = fs::remove_dir_all(root);
 }
 

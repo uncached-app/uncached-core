@@ -13,7 +13,8 @@
 //! separate cost axis: a `node_modules` installed five minutes ago is exactly
 //! as disposable as one from last year, it just costs more to remove.
 
-use crate::filesystem::has_marker_file;
+use crate::discovery::LocationKind;
+use crate::filesystem::{has_marker_file, has_marker_with_extension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -26,6 +27,20 @@ const PROJECT_MANIFESTS: &[&str] = &[
     "pom.xml",
     "build.gradle",
     "build.gradle.kts",
+    "Package.swift",
+    "pubspec.yaml",
+    "Podfile",
+];
+
+/// Ecosystems that name the project file after the project rather than after
+/// the tool, so there is no fixed filename to look for.
+const PROJECT_MANIFEST_EXTENSIONS: &[&str] = &[
+    "xcodeproj",
+    "xcworkspace",
+    "csproj",
+    "fsproj",
+    "vbproj",
+    "sln",
 ];
 
 /// Lockfiles that make the contents reproducible.
@@ -39,6 +54,10 @@ const LOCKFILES: &[&str] = &[
     "poetry.lock",
     "uv.lock",
     "Pipfile.lock",
+    "Package.resolved",
+    "pubspec.lock",
+    "packages.lock.json",
+    "Podfile.lock",
 ];
 
 /// Directories owned by a runtime version manager. What lives under them was
@@ -153,12 +172,17 @@ fn unambiguous_pattern(pattern: &str) -> Option<&str> {
 pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
     ConfidenceInput {
         known_artifact,
-        project_manifest: finds_marker_upwards(path, PROJECT_MANIFESTS),
-        lockfile: finds_marker_upwards(path, LOCKFILES),
+        project_manifest: finds_marker_upwards(
+            path,
+            PROJECT_MANIFESTS,
+            PROJECT_MANIFEST_EXTENSIONS,
+        ),
+        lockfile: finds_marker_upwards(path, LOCKFILES, &[]),
         git_ignored: gitignore_signal(path),
         git_tracked: None,
         version_manager_path: is_version_manager_path(path),
         system_path: is_system_path(path),
+        location_kind: None,
     }
 }
 
@@ -173,13 +197,21 @@ pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
 /// The walk stops at the repository root, so it cannot wander into an unrelated
 /// project higher up the filesystem, and it is depth-bounded for candidates that
 /// live outside any repository.
-fn finds_marker_upwards(path: &Path, names: &[&str]) -> bool {
+fn finds_marker_upwards(path: &Path, names: &[&str], extensions: &[&str]) -> bool {
     let Some(mut directory) = path.parent() else {
         return false;
     };
 
     for _ in 0..MAX_PROJECT_DEPTH {
         if names.iter().any(|name| has_marker_file(directory, name)) {
+            return true;
+        }
+        // Only consulted once the cheap check fails: this reads the directory,
+        // while `has_marker_file` is a single stat.
+        if extensions
+            .iter()
+            .any(|extension| has_marker_with_extension(directory, extension))
+        {
             return true;
         }
         if directory.join(".git").exists() {
@@ -205,11 +237,19 @@ fn is_version_manager_path(path: &Path) -> bool {
 
     // nvm-windows and older installs drop the leading dot, so the directory
     // name alone is too common to trust. A version directory next to it is not.
-    components.windows(2).any(|window| {
+    if components.windows(2).any(|window| {
         (window[0] == "nvm" && is_version_directory(&window[1]))
             || (window[0] == "pnpm" && window[1] == "global")
-            || (window[0] == ".bun" && window[1] == "install")
-    })
+    }) {
+        return true;
+    }
+
+    // `~/.bun/install` holds both the global installs and the download cache,
+    // and only the first is the user's tooling. Matching the parent alone would
+    // veto the cache too, and label it as globally installed packages.
+    components
+        .windows(3)
+        .any(|window| window[0] == ".bun" && window[1] == "install" && window[2] == "global")
 }
 
 fn is_version_directory(name: &str) -> bool {
@@ -284,6 +324,12 @@ pub enum ConfidenceSignal {
     SystemPath,
     /// No project could be associated with it.
     NoProjectContext,
+    /// The path matched a catalogued location belonging to a named tool.
+    KnownLocation,
+    /// A cache shared by every project on the machine.
+    SharedCache,
+    /// State written by a tool rather than produced by a build.
+    ToolState,
 }
 
 impl ConfidenceSignal {
@@ -300,6 +346,11 @@ impl ConfidenceSignal {
             }
             Self::SystemPath => "Belongs to the operating system, not to a project",
             Self::NoProjectContext => "No project found around it",
+            Self::KnownLocation => "Known cache location belonging to a specific tool",
+            Self::SharedCache => {
+                "Shared by every project: clearing it makes future installs slower"
+            }
+            Self::ToolState => "Belongs to a tool rather than to a build",
         }
     }
 
@@ -308,7 +359,11 @@ impl ConfidenceSignal {
     pub fn is_supporting(&self) -> bool {
         matches!(
             self,
-            Self::KnownArtifact | Self::ProjectManifest | Self::Lockfile | Self::DeclaredDisposable
+            Self::KnownArtifact
+                | Self::ProjectManifest
+                | Self::Lockfile
+                | Self::DeclaredDisposable
+                | Self::KnownLocation
         )
     }
 }
@@ -337,6 +392,9 @@ pub struct ConfidenceInput {
     pub version_manager_path: bool,
     /// Sits under an operating system directory.
     pub system_path: bool,
+    /// Set when the candidate came from the catalogue of known locations rather
+    /// than from a workspace walk. `None` for anything found by traversal.
+    pub location_kind: Option<LocationKind>,
 }
 
 /// The result of weighing the signals.
@@ -364,6 +422,12 @@ const SCORE_LOCKFILE: i32 = 15;
 /// corroborate; they are not entry requirements.
 const THRESHOLD_HIGH: i32 = 70;
 const THRESHOLD_MEDIUM: i32 = 45;
+/// A catalogued location is the strongest identification available: the path
+/// was not guessed from a directory name, it was named in advance along with
+/// the tool that writes it. That certainty is about *what the directory is*,
+/// which is precisely what confidence measures — what it costs to delete is
+/// decided separately, by the location's kind.
+const SCORE_KNOWN_LOCATION: i32 = 60;
 
 /// Weighs the signals into a level and the reasons behind it.
 ///
@@ -378,6 +442,11 @@ const THRESHOLD_MEDIUM: i32 = 45;
 /// `~/.nvm/versions/node/*/lib` is not a project's dependencies: it is the
 /// packages installed with `npm i -g` for that runtime. Removing it uninstalls
 /// the user's tooling, and no build step brings it back.
+///
+/// Catalogued locations are weighed on the same scale but answer to a ceiling
+/// as well as to a score. Being certain what a shared package store is does not
+/// make emptying it a good idea, so a shared cache stops at `Medium` however
+/// well identified it is, and tool state stops at `Review`.
 pub fn assess(input: ConfidenceInput) -> Confidence {
     let mut signals = Vec::new();
     let mut score = 0;
@@ -386,10 +455,22 @@ pub fn assess(input: ConfidenceInput) -> Confidence {
         signals.push(ConfidenceSignal::KnownArtifact);
         score += SCORE_KNOWN_ARTIFACT;
     }
+    if let Some(kind) = input.location_kind {
+        signals.push(ConfidenceSignal::KnownLocation);
+        score += SCORE_KNOWN_LOCATION;
+        match kind {
+            LocationKind::Artifact => {}
+            LocationKind::SharedCache => signals.push(ConfidenceSignal::SharedCache),
+            LocationKind::ToolState => signals.push(ConfidenceSignal::ToolState),
+        }
+    }
     if input.project_manifest {
         signals.push(ConfidenceSignal::ProjectManifest);
         score += SCORE_PROJECT_MANIFEST;
-    } else {
+    } else if input.location_kind.is_none() {
+        // A catalogued location has no project above it by construction.
+        // Reporting that as a finding would be true of every single one, and
+        // would read as a doubt the catalogue does not actually have.
         signals.push(ConfidenceSignal::NoProjectContext);
     }
     if input.lockfile {
@@ -414,10 +495,19 @@ pub fn assess(input: ConfidenceInput) -> Confidence {
     let level = if vetoed {
         ConfidenceLevel::Review
     } else {
-        level_for_score(score)
+        level_for_score(score).min(ceiling_for(input.location_kind))
     };
 
     Confidence { level, signals }
+}
+
+/// The highest level a location's kind allows, whatever the score says.
+fn ceiling_for(kind: Option<LocationKind>) -> ConfidenceLevel {
+    match kind {
+        None | Some(LocationKind::Artifact) => ConfidenceLevel::High,
+        Some(LocationKind::SharedCache) => ConfidenceLevel::Medium,
+        Some(LocationKind::ToolState) => ConfidenceLevel::Review,
+    }
 }
 
 fn level_for_score(score: i32) -> ConfidenceLevel {
@@ -457,6 +547,66 @@ mod tests {
         assert!(!confidence
             .signals
             .contains(&ConfidenceSignal::NoProjectContext));
+    }
+
+    /// The ceiling is not a low score dressed up as a rule. A shared cache
+    /// carrying every supporting signal there is still stops at Medium, because
+    /// what caps it is the cost of deleting it, not any doubt about what it is.
+    #[test]
+    fn a_shared_cache_is_capped_even_with_a_perfect_score() {
+        let input = ConfidenceInput {
+            location_kind: Some(LocationKind::SharedCache),
+            ..project_artifact()
+        };
+
+        let confidence = assess(input);
+
+        assert_eq!(confidence.level, ConfidenceLevel::Medium);
+        assert!(confidence.signals.contains(&ConfidenceSignal::SharedCache));
+        assert!(confidence
+            .signals
+            .contains(&ConfidenceSignal::KnownLocation));
+    }
+
+    #[test]
+    fn a_catalogued_location_is_not_reported_as_lacking_a_project() {
+        let confidence = assess(ConfidenceInput {
+            known_artifact: true,
+            location_kind: Some(LocationKind::Artifact),
+            ..ConfidenceInput::default()
+        });
+
+        assert_eq!(confidence.level, ConfidenceLevel::High);
+        assert!(!confidence
+            .signals
+            .contains(&ConfidenceSignal::NoProjectContext));
+    }
+
+    /// The distinction that made the version manager veto necessary in the
+    /// first place: `~/.bun/install/global` is what the user installed, while
+    /// `~/.bun/install/cache` beside it is a download cache.
+    #[test]
+    fn only_bun_global_installs_count_as_a_version_manager_path() {
+        assert!(is_version_manager_path(Path::new(
+            "/home/user/.bun/install/global/node_modules"
+        )));
+        assert!(!is_version_manager_path(Path::new(
+            "/home/user/.bun/install/cache"
+        )));
+    }
+
+    #[test]
+    fn a_project_file_named_after_the_project_still_counts_as_a_manifest() {
+        let root = std::env::temp_dir().join("uncached-confidence-xcode");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("DerivedData")).expect("fixture should be created");
+        std::fs::create_dir_all(root.join("App.xcodeproj")).expect("fixture should be created");
+
+        let input = collect_signals(&root.join("DerivedData"), true);
+
+        assert!(input.project_manifest);
+        assert_eq!(assess(input).level, ConfidenceLevel::High);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

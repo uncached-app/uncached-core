@@ -405,6 +405,28 @@ pub fn has_marker_file(parent: &Path, name: &str) -> bool {
     fs::symlink_metadata(parent.join(name)).is_ok_and(|metadata| metadata.is_file())
 }
 
+/// True when `parent` directly contains an entry whose extension is `extension`.
+///
+/// Some ecosystems name the project file after the project rather than after
+/// the tool: an Xcode project is `Whatever.xcodeproj` and a .NET one is
+/// `Whatever.csproj`, so there is no fixed name to look for. Unlike
+/// `has_marker_file` this accepts directories, because `.xcodeproj` and
+/// `.xcworkspace` are bundles.
+///
+/// The comparison is case-insensitive: the filesystems these markers live on
+/// usually are, and a project saved as `.CSPROJ` is the same project.
+pub fn has_marker_with_extension(parent: &Path, extension: &str) -> bool {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .path()
+            .extension()
+            .is_some_and(|found| found.eq_ignore_ascii_case(extension))
+    })
+}
+
 pub fn is_within(root: &Path, target: &Path) -> bool {
     target != root && target.starts_with(root)
 }

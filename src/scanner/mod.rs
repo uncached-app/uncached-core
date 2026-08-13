@@ -6,8 +6,9 @@ use crate::model::{Category, FileIdentity};
 use std::path::{Path, PathBuf};
 
 pub use providers::{
-    CargoTargetScanner, GradleScanner, NextCacheScanner, NodeModulesScanner, PyCacheScanner,
-    TurboCacheScanner,
+    CargoTargetScanner, DartToolScanner, DotNetObjScanner, GradleScanner, NextCacheScanner,
+    NodeModulesScanner, PyCacheScanner, SwiftBuildScanner, TurboCacheScanner,
+    XcodeDerivedDataScanner,
 };
 #[cfg(feature = "bench")]
 pub use pruning::PrunedPaths;
@@ -82,6 +83,10 @@ impl ProviderSet {
                 Box::new(TurboCacheScanner),
                 Box::new(PyCacheScanner),
                 Box::new(GradleScanner),
+                Box::new(XcodeDerivedDataScanner),
+                Box::new(SwiftBuildScanner),
+                Box::new(DotNetObjScanner),
+                Box::new(DartToolScanner),
             ],
         }
     }
@@ -96,6 +101,10 @@ impl ProviderSet {
                 Box::new(CargoTargetScanner),
                 Box::new(NextCacheScanner),
                 Box::new(TurboCacheScanner),
+                Box::new(XcodeDerivedDataScanner),
+                Box::new(SwiftBuildScanner),
+                Box::new(DotNetObjScanner),
+                Box::new(DartToolScanner),
             ],
         }
     }
