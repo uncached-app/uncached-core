@@ -37,6 +37,11 @@ impl Category {
         }
     }
 
+    pub fn custom(name: impl Into<String>) -> Option<Self> {
+        let name = name.into();
+        valid_custom_category_name(&name).then_some(Self::Custom(name))
+    }
+
     /// Parses the wire form. Unknown names are rejected rather than silently
     /// folded into `Custom`, which is reserved for the prefixed form.
     pub fn from_wire(value: &str) -> Option<Self> {
@@ -74,6 +79,11 @@ impl Serialize for Category {
     where
         S: serde::Serializer,
     {
+        if let Self::Custom(name) = self {
+            if !valid_custom_category_name(name) {
+                return Err(serde::ser::Error::custom("invalid custom category name"));
+            }
+        }
         serializer.serialize_str(&self.as_wire())
     }
 }
@@ -94,6 +104,10 @@ pub struct ScanTarget {
     pub path: PathBuf,
     pub category: Category,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub size_pending: bool,
+    #[serde(default)]
+    pub size_has_errors: bool,
     pub identity: Option<FileIdentity>,
 }
 
@@ -103,12 +117,20 @@ impl ScanTarget {
             path,
             category,
             size_bytes,
+            size_pending: false,
+            size_has_errors: false,
             identity: None,
         }
     }
 
     pub fn with_identity(mut self, identity: Option<FileIdentity>) -> Self {
         self.identity = identity;
+        self
+    }
+
+    pub fn with_size_state(mut self, size_pending: bool, size_has_errors: bool) -> Self {
+        self.size_pending = size_pending;
+        self.size_has_errors = size_has_errors;
         self
     }
 }
@@ -200,6 +222,39 @@ mod tests {
             serde_json::from_value::<Category>(json!("Custom:docker-buildx")).unwrap(),
             category
         );
+    }
+
+    #[test]
+    fn custom_category_constructor_rejects_invalid_names() {
+        assert!(Category::custom("docker-buildx").is_some());
+        assert!(Category::custom("").is_none());
+        assert!(Category::custom("line\nfeed").is_none());
+        assert!(Category::custom("x".repeat(super::MAX_CUSTOM_CATEGORY_NAME_BYTES + 1)).is_none());
+    }
+
+    #[test]
+    fn invalid_custom_categories_cannot_serialize() {
+        assert!(serde_json::to_value(Category::Custom(String::new())).is_err());
+        assert!(serde_json::to_value(Category::Custom("line\nfeed".into())).is_err());
+        assert!(serde_json::to_value(Category::Custom(
+            "x".repeat(super::MAX_CUSTOM_CATEGORY_NAME_BYTES + 1),
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn scan_target_defaults_to_settled_size_state() {
+        let target = super::ScanTarget::new("target".into(), Category::NodeModules, 42);
+        assert!(!target.size_pending);
+        assert!(!target.size_has_errors);
+    }
+
+    #[test]
+    fn scan_target_can_preserve_sizing_state() {
+        let target = super::ScanTarget::new("target".into(), Category::NodeModules, 42)
+            .with_size_state(false, true);
+        assert!(!target.size_pending);
+        assert!(target.size_has_errors);
     }
 
     #[test]

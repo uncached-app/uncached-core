@@ -145,8 +145,8 @@ pub fn clean_permanently(
 fn clean_report_for(target: &ScanTarget) -> CleanReport {
     CleanReport {
         freed_bytes: target.size_bytes,
-        size_pending: false,
-        size_has_errors: false,
+        size_pending: target.size_pending,
+        size_has_errors: target.size_has_errors,
     }
 }
 
@@ -261,6 +261,25 @@ mod tests {
             ));
             assert_eq!(fs::read(target_path.join("child.txt")).unwrap(), b"content");
         }
+    }
+
+    #[test]
+    fn cleanup_report_preserves_sizing_errors() {
+        let root = fixture();
+        let _cleanup = CleanupGuard(root.clone());
+        let project = root.join("project");
+        let target_path = project.join("node_modules");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(project.join("package.json"), b"{}").unwrap();
+        let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 7)
+            .with_identity(file_identity(&target_path))
+            .with_size_state(false, true);
+
+        let report = clean_permanently(&root, &ProviderSet::free(), &target).unwrap();
+
+        assert_eq!(report.freed_bytes, 7);
+        assert!(!report.size_pending);
+        assert!(report.size_has_errors);
     }
 
     #[test]
