@@ -267,7 +267,12 @@ const SCORE_DECLARED_DISPOSABLE: i32 = 25;
 const SCORE_LOCKFILE: i32 = 15;
 const PENALTY_RECENTLY_MODIFIED: i32 = 10;
 
-const THRESHOLD_HIGH: i32 = 80;
+/// A recognized artifact sitting next to a project manifest reaches High on its
+/// own. That pair is what the scanner already requires before offering a
+/// directory for deletion, so demanding more would mark ordinary targets for
+/// review and teach the user to ignore the badge. Lockfiles and `.gitignore`
+/// corroborate; they are not entry requirements.
+const THRESHOLD_HIGH: i32 = 70;
 const THRESHOLD_MEDIUM: i32 = 45;
 
 /// Weighs the signals into a level and the reasons behind it.
@@ -449,20 +454,48 @@ mod tests {
     }
 
     #[test]
-    fn recent_writes_pull_a_candidate_down_a_level() {
-        let settled = assess(ConfidenceInput {
-            git_ignored: Some(false),
-            ..project_artifact()
-        });
+    fn recent_writes_pull_a_borderline_candidate_down_a_level() {
+        let minimal = ConfidenceInput {
+            known_artifact: true,
+            project_manifest: true,
+            ..ConfidenceInput::default()
+        };
+        let settled = assess(minimal);
         let recent = assess(ConfidenceInput {
-            git_ignored: Some(false),
             recently_modified: true,
-            ..project_artifact()
+            ..minimal
         });
 
         assert_eq!(settled.level, ConfidenceLevel::High);
         assert_eq!(recent.level, ConfidenceLevel::Medium);
         assert!(recent.signals.contains(&ConfidenceSignal::RecentlyModified));
+    }
+
+    // The pair the scanner already requires before offering a directory for
+    // deletion. A lockfile is not committed in every ecosystem, so demanding
+    // more would mark ordinary Gradle and Python targets for review and teach
+    // the user to ignore the badge.
+    #[test]
+    fn a_recognized_artifact_next_to_a_manifest_is_high_on_its_own() {
+        let confidence = assess(ConfidenceInput {
+            known_artifact: true,
+            project_manifest: true,
+            ..ConfidenceInput::default()
+        });
+
+        assert_eq!(confidence.level, ConfidenceLevel::High);
+    }
+
+    // Corroborating evidence absorbs the recency penalty, otherwise every
+    // artifact in a project worked on today would ask for review.
+    #[test]
+    fn recent_writes_do_not_downgrade_a_well_evidenced_candidate() {
+        let confidence = assess(ConfidenceInput {
+            recently_modified: true,
+            ..project_artifact()
+        });
+
+        assert_eq!(confidence.level, ConfidenceLevel::High);
     }
 
     #[test]
