@@ -86,6 +86,20 @@ impl ProviderSet {
         }
     }
 
+    /// Returns only providers that require project context before classifying a
+    /// directory. This is the conservative policy for callers where deleting a
+    /// same-named directory is more dangerous than missing a cache.
+    pub fn all_contextual() -> Self {
+        Self {
+            scanners: vec![
+                Box::new(NodeModulesScanner),
+                Box::new(CargoTargetScanner),
+                Box::new(NextCacheScanner),
+                Box::new(TurboCacheScanner),
+            ],
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.scanners.len()
     }

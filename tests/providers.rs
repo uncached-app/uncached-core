@@ -189,6 +189,21 @@ fn context_free_providers_accept_reachable_same_basename_directories() {
 }
 
 #[test]
+fn contextual_policy_excludes_name_only_cache_providers() {
+    let root = fixture();
+
+    fs::create_dir_all(root.join("python/__pycache__")).unwrap();
+    fs::create_dir_all(root.join("gradle/.gradle")).unwrap();
+    fs::create_dir_all(root.join("node/node_modules")).unwrap();
+    fs::write(root.join("node/package.json"), b"{}").unwrap();
+
+    let found = categories(&root, &ProviderSet::all_contextual());
+
+    assert_eq!(found, vec![Category::NodeModules]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn git_subtrees_are_pruned_before_provider_matching() {
     let root = fixture();
     fs::create_dir_all(root.join(".git/fake-python/__pycache__")).unwrap();
