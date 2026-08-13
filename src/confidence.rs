@@ -69,6 +69,11 @@ const SYSTEM_ROOTS: &[&str] = &[
 /// enough for a monorepo, bounded so a pathological path cannot walk forever.
 const MAX_IGNORE_DEPTH: usize = 32;
 
+/// How far above an artifact its project may sit. Deep enough for a nested
+/// package in a monorepo, shallow enough that an artifact outside any
+/// repository cannot borrow a manifest from an unrelated ancestor.
+const MAX_PROJECT_DEPTH: usize = 8;
+
 /// Answers whether the project declares this directory disposable, reading the
 /// `.gitignore` files between the candidate and its repository root.
 ///
@@ -146,12 +151,10 @@ fn unambiguous_pattern(pattern: &str) -> Option<&str> {
 /// Git, and an unchecked signal is honest while a guessed one is not. A caller
 /// that can afford the lookup fills that field before assessing.
 pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
-    let parent = path.parent();
-
     ConfidenceInput {
         known_artifact,
-        project_manifest: parent.is_some_and(|parent| has_any_marker(parent, PROJECT_MANIFESTS)),
-        lockfile: parent.is_some_and(|parent| has_any_marker(parent, LOCKFILES)),
+        project_manifest: finds_marker_upwards(path, PROJECT_MANIFESTS),
+        lockfile: finds_marker_upwards(path, LOCKFILES),
         git_ignored: gitignore_signal(path),
         git_tracked: None,
         version_manager_path: is_version_manager_path(path),
@@ -159,8 +162,35 @@ pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
     }
 }
 
-fn has_any_marker(parent: &Path, names: &[&str]) -> bool {
-    names.iter().any(|name| has_marker_file(parent, name))
+/// Looks for one of `names` from the candidate's parent up to its project root.
+///
+/// An artifact does not have to sit beside the manifest to belong to the
+/// project: `__pycache__` appears in every Python subpackage while
+/// `pyproject.toml` exists only once, at the top. Checking the immediate parent
+/// alone reports those as having no project around them, which is both wrong
+/// and the common case.
+///
+/// The walk stops at the repository root, so it cannot wander into an unrelated
+/// project higher up the filesystem, and it is depth-bounded for candidates that
+/// live outside any repository.
+fn finds_marker_upwards(path: &Path, names: &[&str]) -> bool {
+    let Some(mut directory) = path.parent() else {
+        return false;
+    };
+
+    for _ in 0..MAX_PROJECT_DEPTH {
+        if names.iter().any(|name| has_marker_file(directory, name)) {
+            return true;
+        }
+        if directory.join(".git").exists() {
+            return false;
+        }
+        match directory.parent() {
+            Some(parent) => directory = parent,
+            None => return false,
+        }
+    }
+    false
 }
 
 fn is_version_manager_path(path: &Path) -> bool {
@@ -240,7 +270,7 @@ pub enum ConfidenceLevel {
 pub enum ConfidenceSignal {
     /// A provider recognized the directory as a known artifact type.
     KnownArtifact,
-    /// A project manifest sits next to it.
+    /// A project manifest sits next to it or above it.
     ProjectManifest,
     /// A lockfile sits next to it, so the contents can be reproduced.
     Lockfile,
@@ -261,8 +291,8 @@ impl ConfidenceSignal {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::KnownArtifact => "Recognized build artifact",
-            Self::ProjectManifest => "Project manifest found alongside it",
-            Self::Lockfile => "Lockfile found, contents are reproducible",
+            Self::ProjectManifest => "Sits inside a project with a manifest",
+            Self::Lockfile => "The project has a lockfile, contents are reproducible",
             Self::DeclaredDisposable => "Declared disposable by the project's .gitignore",
             Self::VersionControlled => "Tracked by Git, so it is not a build output",
             Self::VersionManagerPath => {
@@ -567,6 +597,40 @@ mod tests {
         // Git costs a subprocess, so collection leaves it unanswered.
         assert_eq!(input.git_ignored, None);
         assert_eq!(input.git_tracked, None);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_nested_artifact_still_belongs_to_its_project() {
+        let root = fixture("nested-artifact");
+        let project = root.join("app");
+        let target = project.join("pkg").join("sub").join("__pycache__");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::write(project.join("pyproject.toml"), b"").unwrap();
+
+        let input = collect_signals(&target, true);
+
+        assert!(input.project_manifest);
+        assert_eq!(assess(input).level, ConfidenceLevel::High);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // The walk must not reach past the repository that owns the candidate,
+    // otherwise an unrelated project higher up would vouch for it.
+    #[test]
+    fn the_manifest_search_stops_at_the_repository_root() {
+        let root = fixture("manifest-bounded");
+        let repository = root.join("scripts");
+        let target = repository.join("__pycache__");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        // Belongs to something else entirely, one level above the repository.
+        std::fs::write(root.join("pyproject.toml"), b"").unwrap();
+
+        assert!(!collect_signals(&target, true).project_manifest);
 
         let _ = std::fs::remove_dir_all(root);
     }
