@@ -7,11 +7,15 @@
 //! Assessment is a pure function of collected signals. It performs no I/O, so
 //! the code that decides whether something may be deleted can be tested
 //! exhaustively without a filesystem, and behaves identically on every caller.
+//!
+//! Confidence answers whether something is disposable, and nothing else. How
+//! recently it was written, and what it costs to regenerate, belong to the
+//! separate cost axis: a `node_modules` installed five minutes ago is exactly
+//! as disposable as one from last year, it just costs more to remove.
 
 use crate::filesystem::has_marker_file;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 
 /// Manifests that mark the parent directory as a project root.
 const PROJECT_MANIFESTS: &[&str] = &[
@@ -60,8 +64,6 @@ const SYSTEM_ROOTS: &[&str] = &[
     "/Library",
     "/Applications",
 ];
-
-const RECENT_WRITE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How far up the tree to look for `.gitignore` files before giving up. Deep
 /// enough for a monorepo, bounded so a pathological path cannot walk forever.
@@ -154,7 +156,6 @@ pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
         git_tracked: None,
         version_manager_path: is_version_manager_path(path),
         system_path: is_system_path(path),
-        recently_modified: was_modified_recently(path),
     }
 }
 
@@ -218,14 +219,6 @@ fn lowercase_components(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn was_modified_recently(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-        .is_some_and(|elapsed| elapsed < RECENT_WRITE_WINDOW)
-}
-
 /// What the user sees. The score behind it stays internal so thresholds can be
 /// tuned without turning into a number the UI has to explain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -259,8 +252,6 @@ pub enum ConfidenceSignal {
     VersionManagerPath,
     /// The path belongs to the operating system rather than to a project.
     SystemPath,
-    /// Written to very recently, so something may still be using it.
-    RecentlyModified,
     /// No project could be associated with it.
     NoProjectContext,
 }
@@ -278,7 +269,6 @@ impl ConfidenceSignal {
                 "Version manager directory, holds globally installed packages"
             }
             Self::SystemPath => "Belongs to the operating system, not to a project",
-            Self::RecentlyModified => "Written to in the last day",
             Self::NoProjectContext => "No project found around it",
         }
     }
@@ -317,8 +307,6 @@ pub struct ConfidenceInput {
     pub version_manager_path: bool,
     /// Sits under an operating system directory.
     pub system_path: bool,
-    /// Modified within the last day.
-    pub recently_modified: bool,
 }
 
 /// The result of weighing the signals.
@@ -339,8 +327,6 @@ const SCORE_KNOWN_ARTIFACT: i32 = 40;
 const SCORE_PROJECT_MANIFEST: i32 = 30;
 const SCORE_DECLARED_DISPOSABLE: i32 = 25;
 const SCORE_LOCKFILE: i32 = 15;
-const PENALTY_RECENTLY_MODIFIED: i32 = 10;
-
 /// A recognized artifact sitting next to a project manifest reaches High on its
 /// own. That pair is what the scanner already requires before offering a
 /// directory for deletion, so demanding more would mark ordinary targets for
@@ -383,10 +369,6 @@ pub fn assess(input: ConfidenceInput) -> Confidence {
     if input.git_ignored == Some(true) {
         signals.push(ConfidenceSignal::DeclaredDisposable);
         score += SCORE_DECLARED_DISPOSABLE;
-    }
-    if input.recently_modified {
-        signals.push(ConfidenceSignal::RecentlyModified);
-        score -= PENALTY_RECENTLY_MODIFIED;
     }
     if input.version_manager_path {
         signals.push(ConfidenceSignal::VersionManagerPath);
@@ -528,51 +510,6 @@ mod tests {
     }
 
     #[test]
-    fn recent_writes_pull_a_borderline_candidate_down_a_level() {
-        let minimal = ConfidenceInput {
-            known_artifact: true,
-            project_manifest: true,
-            ..ConfidenceInput::default()
-        };
-        let settled = assess(minimal);
-        let recent = assess(ConfidenceInput {
-            recently_modified: true,
-            ..minimal
-        });
-
-        assert_eq!(settled.level, ConfidenceLevel::High);
-        assert_eq!(recent.level, ConfidenceLevel::Medium);
-        assert!(recent.signals.contains(&ConfidenceSignal::RecentlyModified));
-    }
-
-    // The pair the scanner already requires before offering a directory for
-    // deletion. A lockfile is not committed in every ecosystem, so demanding
-    // more would mark ordinary Gradle and Python targets for review and teach
-    // the user to ignore the badge.
-    #[test]
-    fn a_recognized_artifact_next_to_a_manifest_is_high_on_its_own() {
-        let confidence = assess(ConfidenceInput {
-            known_artifact: true,
-            project_manifest: true,
-            ..ConfidenceInput::default()
-        });
-
-        assert_eq!(confidence.level, ConfidenceLevel::High);
-    }
-
-    // Corroborating evidence absorbs the recency penalty, otherwise every
-    // artifact in a project worked on today would ask for review.
-    #[test]
-    fn recent_writes_do_not_downgrade_a_well_evidenced_candidate() {
-        let confidence = assess(ConfidenceInput {
-            recently_modified: true,
-            ..project_artifact()
-        });
-
-        assert_eq!(confidence.level, ConfidenceLevel::High);
-    }
-
-    #[test]
     fn every_signal_explains_itself_and_declares_its_side() {
         let signals = [
             ConfidenceSignal::KnownArtifact,
@@ -582,7 +519,6 @@ mod tests {
             ConfidenceSignal::VersionControlled,
             ConfidenceSignal::VersionManagerPath,
             ConfidenceSignal::SystemPath,
-            ConfidenceSignal::RecentlyModified,
             ConfidenceSignal::NoProjectContext,
         ];
 
@@ -646,17 +582,6 @@ mod tests {
         assert!(!input.project_manifest);
         assert!(!input.lockfile);
         assert_eq!(assess(input).level, ConfidenceLevel::Review);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_freshly_written_directory_reads_as_recently_modified() {
-        let root = fixture("recent");
-        let target = root.join("node_modules");
-        std::fs::create_dir_all(&target).unwrap();
-
-        assert!(collect_signals(&target, true).recently_modified);
 
         let _ = std::fs::remove_dir_all(root);
     }
