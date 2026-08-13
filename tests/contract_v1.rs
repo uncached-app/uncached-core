@@ -225,6 +225,7 @@ fn error_deserialization_rejects_unknown_error_key() {
 fn envelope_accessors_expose_read_only_contract_state() {
     let success = ApiEnvelope::success(Platform::Windows, json!({"value": 1}));
     assert_eq!(success.api_version(), "v1");
+    assert!(success.is_supported_version());
     assert_eq!(success.platform(), &Platform::Windows);
     assert_eq!(success.data(), Some(&json!({"value": 1})));
     assert_eq!(success.error(), None);
@@ -232,9 +233,25 @@ fn envelope_accessors_expose_read_only_contract_state() {
     let error = CoreError::Io(std::io::Error::other("private-native-detail")).public_info();
     let failure = ApiEnvelope::<serde_json::Value>::failure(Platform::Linux, error.clone());
     assert_eq!(failure.api_version(), "v1");
+    assert!(failure.is_supported_version());
     assert_eq!(failure.platform(), &Platform::Linux);
     assert_eq!(failure.data(), None);
     assert_eq!(failure.error(), Some(&error));
+}
+
+#[test]
+fn envelope_deserialization_preserves_unknown_versions_for_adapter_rejection() {
+    let value = json!({
+        "apiVersion": "v2",
+        "platform": "windows",
+        "data": {"value": 1},
+        "error": null
+    });
+
+    let envelope = serde_json::from_value::<ApiEnvelope<serde_json::Value>>(value).unwrap();
+
+    assert_eq!(envelope.api_version(), "v2");
+    assert!(!envelope.is_supported_version());
 }
 
 #[test]

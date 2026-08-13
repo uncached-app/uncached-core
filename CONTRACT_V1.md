@@ -19,7 +19,7 @@ Every serialized envelope has exactly four keys and uses camelCase:
 }
 ```
 
-`apiVersion` is `"v1"` for values constructed with `ApiEnvelope::success` or `ApiEnvelope::failure`. `platform` is one of:
+`apiVersion` is `"v1"` for values constructed with `ApiEnvelope::success` or `ApiEnvelope::failure`. Consumers can use `ApiEnvelope::is_supported_version()` before handling a decoded envelope. `platform` is one of:
 
 ```text
 windows | linux | macos | android | unsupported

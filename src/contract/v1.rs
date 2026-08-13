@@ -1,6 +1,9 @@
 use crate::error::CoreErrorInfo;
 use crate::model::{Category, CleanReport, ScanTarget};
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::marker::PhantomData;
 
 impl<'de> Deserialize<'de> for CoreErrorInfo {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -61,23 +64,89 @@ where
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        #[serde(deny_unknown_fields)]
-        struct ApiEnvelopeFields<T> {
-            api_version: String,
-            platform: Platform,
-            data: Option<Option<T>>,
-            error: Option<Option<CoreErrorInfo>>,
+        struct ApiEnvelopeVisitor<T>(PhantomData<T>);
+
+        impl<'de, T> Visitor<'de> for ApiEnvelopeVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = (
+                String,
+                Platform,
+                Option<T>,
+                Option<CoreErrorInfo>,
+                bool,
+                bool,
+            );
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an API envelope object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut api_version = None;
+                let mut platform = None;
+                let mut data = None;
+                let mut error = None;
+                let mut data_present = false;
+                let mut error_present = false;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "apiVersion" if api_version.is_none() => {
+                            api_version = Some(map.next_value()?);
+                        }
+                        "platform" if platform.is_none() => {
+                            platform = Some(map.next_value()?);
+                        }
+                        "data" if !data_present => {
+                            data = map.next_value()?;
+                            data_present = true;
+                        }
+                        "error" if !error_present => {
+                            error = map.next_value()?;
+                            error_present = true;
+                        }
+                        "apiVersion" | "platform" | "data" | "error" => {
+                            return Err(serde::de::Error::custom(format!(
+                                "duplicate field: {key}"
+                            )));
+                        }
+                        _ => {
+                            return Err(serde::de::Error::unknown_field(
+                                &key,
+                                &["apiVersion", "platform", "data", "error"],
+                            ))
+                        }
+                    }
+                }
+
+                Ok((
+                    api_version.ok_or_else(|| serde::de::Error::missing_field("apiVersion"))?,
+                    platform.ok_or_else(|| serde::de::Error::missing_field("platform"))?,
+                    data,
+                    error,
+                    data_present,
+                    error_present,
+                ))
+            }
         }
 
-        let fields = ApiEnvelopeFields::deserialize(deserializer)?;
-        let data = fields.data.ok_or_else(|| {
-            serde::de::Error::custom("API envelope is missing required key: data")
-        })?;
-        let error = fields.error.ok_or_else(|| {
-            serde::de::Error::custom("API envelope is missing required key: error")
-        })?;
+        let (api_version, platform, data, error, data_present, error_present) =
+            deserializer.deserialize_map(ApiEnvelopeVisitor(PhantomData))?;
+        if !data_present {
+            return Err(serde::de::Error::custom(
+                "API envelope is missing required key: data",
+            ));
+        }
+        if !error_present {
+            return Err(serde::de::Error::custom(
+                "API envelope is missing required key: error",
+            ));
+        }
         if data.is_some() == error.is_some() {
             return Err(serde::de::Error::custom(
                 "API envelope must contain exactly one of data or error",
@@ -85,8 +154,8 @@ where
         }
 
         Ok(Self {
-            api_version: fields.api_version,
-            platform: fields.platform,
+            api_version,
+            platform,
             data,
             error,
         })
@@ -96,6 +165,13 @@ where
 impl<T> ApiEnvelope<T> {
     pub fn api_version(&self) -> &str {
         &self.api_version
+    }
+
+    /// Returns whether this envelope can be handled by the v1 adapter.
+    /// Deserialization intentionally preserves unknown versions so adapters can
+    /// reject them explicitly at their boundary.
+    pub fn is_supported_version(&self) -> bool {
+        self.api_version == API_VERSION
     }
 
     pub fn platform(&self) -> &Platform {
