@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use uncached_core::{traverse_workspace, Category, ProviderSet, TraversalControl};
+use uncached_core::{traverse_workspace, Category, IgnoreRules, ProviderSet, TraversalControl};
 
 static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -285,5 +285,78 @@ fn git_subtrees_are_pruned_before_provider_matching() {
     assert!(!visited
         .iter()
         .any(|path| path.starts_with(root.join(".git"))));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The user's rules are the one input that overrules everything else the crate
+/// decides, so they are checked where a deletion is authorized as well as where
+/// a directory is found. These two tests are the pair: the walk never reaches
+/// the path, and cleanup refuses it even when handed it directly.
+#[test]
+fn an_ignored_path_is_never_walked_into() {
+    let root = fixture();
+    fs::create_dir_all(root.join("keep/node_modules")).unwrap();
+    fs::write(root.join("keep/package.json"), b"{}").unwrap();
+    fs::create_dir_all(root.join("skip/node_modules")).unwrap();
+    fs::write(root.join("skip/package.json"), b"{}").unwrap();
+
+    let canonical = fs::canonicalize(&root).unwrap();
+    let (rules, errors) =
+        IgnoreRules::compile(&format!("{}/skip", canonical.to_string_lossy()), None);
+    assert!(errors.is_empty(), "{errors:?}");
+    let providers = ProviderSet::all().with_ignore_rules(rules);
+
+    let mut visited = Vec::new();
+    let cancelled = AtomicBool::new(false);
+    traverse_workspace(&root, &providers, &cancelled, |entry| {
+        visited.push(entry.path.clone());
+        TraversalControl::Continue
+    })
+    .unwrap();
+
+    assert!(visited
+        .iter()
+        .any(|path| path.ends_with("keep/node_modules")));
+    assert!(
+        !visited
+            .iter()
+            .any(|path| path.starts_with(canonical.join("skip"))),
+        "an excluded directory must not be searched either"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cleanup_refuses_a_target_a_rule_excludes() {
+    let root = fixture();
+    let target_path = root.join("project/node_modules");
+    fs::create_dir_all(&target_path).unwrap();
+    fs::write(root.join("project/package.json"), b"{}").unwrap();
+
+    let canonical_root = fs::canonicalize(&root).unwrap();
+    let canonical_target = fs::canonicalize(&target_path).unwrap();
+    let target = uncached_core::ScanTarget::new(canonical_target.clone(), Category::NodeModules, 0)
+        .with_identity(uncached_core::filesystem::file_identity(&canonical_target));
+
+    // Without a rule the same target validates, so the refusal below is the
+    // rule doing it and not some unrelated part of the policy.
+    assert!(
+        uncached_core::validate_clean_target(&canonical_root, &ProviderSet::all(), &target,)
+            .is_ok()
+    );
+
+    let (rules, errors) = IgnoreRules::compile(&canonical_target.to_string_lossy(), None);
+    assert!(errors.is_empty(), "{errors:?}");
+    let error = uncached_core::validate_clean_target(
+        &canonical_root,
+        &ProviderSet::all().with_ignore_rules(rules),
+        &target,
+    )
+    .expect_err("an excluded target must not be cleanable");
+
+    assert!(
+        matches!(error, uncached_core::CoreError::TargetIgnoredByRule { .. }),
+        "unexpected error: {error:?}"
+    );
     let _ = fs::remove_dir_all(root);
 }

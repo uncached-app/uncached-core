@@ -59,6 +59,13 @@ where
         if pruned.contains_ancestor(&path) {
             continue;
         }
+        // Pruned rather than skipped: an excluded directory is not searched
+        // either, so a rule protects everything beneath it without the user
+        // having to say so twice.
+        if providers.excludes(&path) {
+            pruned.insert(path);
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         let category = providers.classify(&name, &path);
         let identity = category.as_ref().and_then(|_| file_identity(&path));

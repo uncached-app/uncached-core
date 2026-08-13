@@ -16,6 +16,7 @@ pub enum CoreErrorCode {
     TargetProviderMismatch,
     TargetContextInvalid,
     TargetOutsideWorkspace,
+    TargetIgnoredByRule,
     TargetIdentityUnavailable,
     TargetIdentityChanged,
     TargetReparsePoint,
@@ -61,6 +62,8 @@ pub enum CoreError {
     TargetContextInvalid { path: PathBuf },
     #[error("target is outside the safe workspace: {path}")]
     TargetOutsideWorkspace { path: PathBuf },
+    #[error("target is excluded by an ignore rule: {path}")]
+    TargetIgnoredByRule { path: PathBuf },
     #[error("target identity unavailable: {path}")]
     TargetIdentityUnavailable { path: PathBuf },
     #[error("target identity changed: {path}")]
@@ -172,6 +175,12 @@ impl CoreError {
             Self::TargetOutsideWorkspace { path } => (
                 CoreErrorCode::TargetOutsideWorkspace,
                 "target is outside the safe workspace",
+                Some(path.to_string_lossy().into_owned()),
+                None,
+            ),
+            Self::TargetIgnoredByRule { path } => (
+                CoreErrorCode::TargetIgnoredByRule,
+                "target is excluded by an ignore rule",
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
@@ -303,6 +312,7 @@ mod tests {
             CoreErrorCode::TargetProviderMismatch => "target_provider_mismatch",
             CoreErrorCode::TargetContextInvalid => "target_context_invalid",
             CoreErrorCode::TargetOutsideWorkspace => "target_outside_workspace",
+            CoreErrorCode::TargetIgnoredByRule => "target_ignored_by_rule",
             CoreErrorCode::TargetIdentityUnavailable => "target_identity_unavailable",
             CoreErrorCode::TargetIdentityChanged => "target_identity_changed",
             CoreErrorCode::TargetReparsePoint => "target_reparse_point",
@@ -321,7 +331,7 @@ mod tests {
         }
     }
 
-    const ALL_CODES: [CoreErrorCode; 24] = [
+    const ALL_CODES: [CoreErrorCode; 25] = [
         CoreErrorCode::InvalidWorkspace,
         CoreErrorCode::Io,
         CoreErrorCode::ProviderUnavailable,
@@ -331,6 +341,7 @@ mod tests {
         CoreErrorCode::TargetProviderMismatch,
         CoreErrorCode::TargetContextInvalid,
         CoreErrorCode::TargetOutsideWorkspace,
+        CoreErrorCode::TargetIgnoredByRule,
         CoreErrorCode::TargetIdentityUnavailable,
         CoreErrorCode::TargetIdentityChanged,
         CoreErrorCode::TargetReparsePoint,
@@ -377,6 +388,9 @@ mod tests {
                 path: "target".into(),
             },
             CoreError::TargetOutsideWorkspace {
+                path: "target".into(),
+            },
+            CoreError::TargetIgnoredByRule {
                 path: "target".into(),
             },
             CoreError::TargetIdentityUnavailable {

@@ -4,6 +4,7 @@ pub mod contract;
 pub mod discovery;
 pub mod error;
 pub mod filesystem;
+pub mod ignore_rules;
 pub mod model;
 pub mod scanner;
 
@@ -20,6 +21,7 @@ pub use discovery::{
     LocationKind,
 };
 pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
+pub use ignore_rules::{IgnoreRuleError, IgnoreRules};
 pub use model::{Category, CleanReport, FileIdentity, ScanTarget, TraversalOutcome};
 pub use scanner::{
     traverse_workspace, CargoTargetScanner, DartToolScanner, DotNetObjScanner, GradleScanner,

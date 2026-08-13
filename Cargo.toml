@@ -7,6 +7,7 @@ edition = "2021"
 bench = []
 
 [dependencies]
+globset = "0.4"
 jwalk = "0.8"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0"

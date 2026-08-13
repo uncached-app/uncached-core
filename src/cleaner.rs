@@ -84,6 +84,12 @@ fn validate_clean_policy(
     if !is_within(&root, &canonical) || !is_safe_to_delete(&canonical) {
         return Err(CoreError::TargetOutsideWorkspace { path: canonical });
     }
+    // Checked again here, not only during the walk. A target found before the
+    // rule existed is still in the caller's list, and the walk is not what
+    // authorizes a deletion — this is.
+    if providers.excludes(&canonical) {
+        return Err(CoreError::TargetIgnoredByRule { path: canonical });
+    }
     verify_recorded_identity(target, &canonical)?;
     Ok(CleanPolicy {
         root,

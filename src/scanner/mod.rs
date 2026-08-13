@@ -35,21 +35,48 @@ pub struct TraversalEntry {
     pub identity: Option<FileIdentity>,
 }
 
+/// What a scan looks for, and what it must leave alone.
+///
+/// The ignore rules live here rather than beside the traversal because they
+/// have to reach two places that are far apart in time: the walk, which never
+/// descends into an excluded directory, and the cleanup, which refuses one even
+/// if it was already found. Carrying them with the providers makes that
+/// structural — every function that can authorize a deletion already takes a
+/// `ProviderSet`, so none of them can be called without the rules in hand.
 pub struct ProviderSet {
     scanners: Vec<Box<dyn Scanner>>,
+    ignore_rules: crate::ignore_rules::IgnoreRules,
 }
 
 impl ProviderSet {
     pub fn new() -> Self {
         Self {
             scanners: Vec::new(),
+            ignore_rules: crate::ignore_rules::IgnoreRules::default(),
         }
     }
 
     pub fn with_scanner(scanner: impl Scanner + 'static) -> Self {
         Self {
             scanners: vec![Box::new(scanner)],
+            ignore_rules: crate::ignore_rules::IgnoreRules::default(),
         }
+    }
+
+    /// Attaches the user's exclusions. Without this a set protects nothing,
+    /// which is the right default for a caller that has no rules to apply.
+    pub fn with_ignore_rules(mut self, rules: crate::ignore_rules::IgnoreRules) -> Self {
+        self.ignore_rules = rules;
+        self
+    }
+
+    /// Whether the user has told us to leave this path alone.
+    pub fn excludes(&self, path: &Path) -> bool {
+        self.ignore_rules.excludes(path)
+    }
+
+    pub fn ignore_rules(&self) -> &crate::ignore_rules::IgnoreRules {
+        &self.ignore_rules
     }
 
     /// Adds a provider unless its category is already registered.
@@ -88,6 +115,7 @@ impl ProviderSet {
                 Box::new(DotNetObjScanner),
                 Box::new(DartToolScanner),
             ],
+            ignore_rules: crate::ignore_rules::IgnoreRules::default(),
         }
     }
 
@@ -106,6 +134,7 @@ impl ProviderSet {
                 Box::new(DotNetObjScanner),
                 Box::new(DartToolScanner),
             ],
+            ignore_rules: crate::ignore_rules::IgnoreRules::default(),
         }
     }
 
