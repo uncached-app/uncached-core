@@ -88,11 +88,7 @@ impl SecureTarget {
             #[cfg(windows)]
             BackendTarget::Windows(target) => target.delete_permanently(),
             #[cfg(all(unix, not(target_os = "android")))]
-            BackendTarget::Unix { path, identity } => {
-                verify_unix_identity(&path, identity)?;
-                std::fs::remove_dir_all(&path)
-                    .map_err(|source| CoreError::SecureDeletionFailed { path, source })
-            }
+            BackendTarget::Unix { path, identity } => delete_unix_target(&path, identity),
             BackendTarget::Unsupported => Err(permanent_cleanup_unsupported()),
         }
     }
@@ -126,6 +122,244 @@ fn verify_unix_identity(path: &std::path::Path, expected: FileIdentity) -> CoreR
         });
     }
     Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
+fn delete_unix_target(path: &Path, expected: FileIdentity) -> CoreResult<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| CoreError::SecureDeletionFailed {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no name"),
+        })?;
+    let parent_fd = open_directory(parent).map_err(|source| CoreError::SecureDeletionFailed {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let name = CString::new(name.as_bytes()).map_err(|_| CoreError::SecureDeletionFailed {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "target name contains NUL"),
+    })?;
+    let target_fd = open_directory_at(parent_fd, &name).map_err(|source| {
+        close_fd(parent_fd);
+        CoreError::SecureDeletionFailed {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+
+    let actual = file_identity_from_fd(target_fd).ok_or_else(|| {
+        close_fd(target_fd);
+        close_fd(parent_fd);
+        CoreError::TargetIdentityUnavailable {
+            path: path.to_path_buf(),
+        }
+    })?;
+    if actual != expected {
+        close_fd(target_fd);
+        close_fd(parent_fd);
+        return Err(CoreError::TargetIdentityChanged {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let result = remove_tree_at(target_fd);
+    close_fd(target_fd);
+    if let Err(source) = result {
+        close_fd(parent_fd);
+        return Err(CoreError::SecureDeletionFailed {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+
+    // The tree is removed through the pinned directory fd. Re-check the name
+    // before unlinking it so a replacement is rejected rather than removed.
+    let current = identity_at(parent_fd, &name).ok_or_else(|| {
+        close_fd(parent_fd);
+        CoreError::TargetIdentityUnavailable {
+            path: path.to_path_buf(),
+        }
+    })?;
+    if current != expected {
+        close_fd(parent_fd);
+        return Err(CoreError::TargetIdentityChanged {
+            path: path.to_path_buf(),
+        });
+    }
+    let status = unsafe { libc::unlinkat(parent_fd, name.as_ptr(), libc::AT_REMOVEDIR) };
+    let result = if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    };
+    close_fd(parent_fd);
+    result.map_err(|source| CoreError::SecureDeletionFailed {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
+fn remove_tree_at(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
+    use std::ffi::{CStr, CString};
+
+    let scan_fd = unsafe { libc::dup(fd) };
+    if scan_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let directory = unsafe { libc::fdopendir(scan_fd) };
+    if directory.is_null() {
+        close_fd(scan_fd);
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut entries = Vec::new();
+    loop {
+        clear_errno();
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe { libc::closedir(directory) };
+            if error.raw_os_error().is_some_and(|code| code != 0) {
+                return Err(error);
+            }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            entries.push(name.to_owned());
+        }
+    }
+    for name in entries {
+        let child = CString::new(name.as_bytes()).expect("directory entry cannot contain NUL");
+        match open_directory_at(fd, &child) {
+            Ok(child_fd) => {
+                let result = remove_tree_at(child_fd);
+                close_fd(child_fd);
+                result?;
+                if unsafe { libc::unlinkat(fd, child.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                if unsafe { libc::unlinkat(fd, child.as_ptr(), 0) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
+fn file_identity_from_fd(fd: std::os::unix::io::RawFd) -> Option<FileIdentity> {
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut metadata) } != 0 {
+        return None;
+    }
+    let mut file_id = [0; 16];
+    file_id[..8].copy_from_slice(&(metadata.st_ino as u64).to_le_bytes());
+    Some(FileIdentity {
+        volume_serial: metadata.st_dev as u64,
+        file_id,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
+fn identity_at(parent: std::os::unix::io::RawFd, name: &std::ffi::CStr) -> Option<FileIdentity> {
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe {
+        libc::fstatat(
+            parent,
+            name.as_ptr(),
+            &mut metadata,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return None;
+    }
+    if (metadata.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+        return None;
+    }
+    let mut file_id = [0; 16];
+    file_id[..8].copy_from_slice(&(metadata.st_ino as u64).to_le_bytes());
+    Some(FileIdentity {
+        volume_serial: metadata.st_dev as u64,
+        file_id,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
+fn open_directory(path: &Path) -> std::io::Result<std::os::unix::io::RawFd> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(fd)
+    }
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
+fn open_directory_at(
+    parent: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::os::unix::io::RawFd> {
+    let fd = unsafe {
+        libc::openat(
+            parent,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(fd)
+    }
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
+fn close_fd(fd: std::os::unix::io::RawFd) {
+    unsafe {
+        libc::close(fd);
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(target_os = "android"),
+    any(target_os = "macos", target_os = "ios")
+))]
+fn clear_errno() {
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(target_os = "android"),
+    not(any(target_os = "macos", target_os = "ios"))
+))]
+fn clear_errno() {
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
 }
 
 fn permanent_cleanup_unsupported() -> CoreError {
