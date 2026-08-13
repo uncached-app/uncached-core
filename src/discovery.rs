@@ -117,7 +117,15 @@ pub fn probe_home(home: &Path) -> Vec<Discovery> {
             // A symlink is followed by nobody here: the table names real
             // directories, and a link standing in for one is a fact about this
             // machine that we did not verify.
-            (metadata.is_dir() && !metadata.file_type().is_symlink()).then_some(Discovery {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return None;
+            }
+            // Reported resolved, like traversal reports its findings. A home
+            // reached through a symlink would otherwise produce discoveries
+            // that no ignore rule written against the real path can match, and
+            // that cleanup canonicalizes into something else again.
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
+            Some(Discovery {
                 path,
                 label: location.label,
                 category: location.category.clone(),
@@ -410,7 +418,11 @@ mod tests {
         let found = probe_home(home.path());
 
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].path, expected);
+        assert_eq!(
+            found[0].path,
+            expected.canonicalize().expect("fixture should resolve"),
+            "discoveries are reported resolved, like traversal reports its own"
+        );
         assert_eq!(found[0].label, location.label);
     }
 
