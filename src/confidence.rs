@@ -63,12 +63,86 @@ const SYSTEM_ROOTS: &[&str] = &[
 
 const RECENT_WRITE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How far up the tree to look for `.gitignore` files before giving up. Deep
+/// enough for a monorepo, bounded so a pathological path cannot walk forever.
+const MAX_IGNORE_DEPTH: usize = 32;
+
+/// Answers whether the project declares this directory disposable, reading the
+/// `.gitignore` files between the candidate and its repository root.
+///
+/// This deliberately understands only unambiguous patterns: a bare name, a
+/// trailing slash, a rooted path, a `**/` prefix. Anything else — globs,
+/// character classes, a negation touching the same name — makes the file's
+/// intent unclear to a matcher this simple, and the answer becomes `None`.
+///
+/// That asymmetry is the point. `Some(true)` means the project said so and the
+/// signal can be trusted. `None` means "not established", never "not ignored",
+/// so a pattern we cannot parse can only cost a candidate corroboration it
+/// might have earned, never mark it as undeclared. Full `.gitignore` semantics
+/// would need Git itself or a matching library; neither is worth a subprocess
+/// per candidate or a dependency for a corroborating signal.
+pub fn gitignore_signal(path: &Path) -> Option<bool> {
+    let name = path.file_name()?.to_str()?;
+    let mut directory = path.parent()?;
+
+    for _ in 0..MAX_IGNORE_DEPTH {
+        if let Some(declared) = declares_disposable(&directory.join(".gitignore"), name) {
+            return Some(declared).filter(|declared| *declared);
+        }
+        if directory.join(".git").exists() {
+            return None;
+        }
+        directory = directory.parent()?;
+    }
+    None
+}
+
+/// `Some(true)` when the file clearly ignores `name`, `Some(false)` when it
+/// clearly un-ignores it, `None` when this file says nothing usable about it.
+fn declares_disposable(ignore_file: &Path, name: &str) -> Option<bool> {
+    let contents = std::fs::read_to_string(ignore_file).ok()?;
+    let mut declared = None;
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+        let Some(pattern) = unambiguous_pattern(pattern) else {
+            continue;
+        };
+        if pattern == name {
+            // Later lines win in Git, so keep reading instead of returning.
+            declared = Some(!negated);
+        }
+    }
+
+    declared
+}
+
+/// Strips the decorations this matcher understands and rejects everything else.
+fn unambiguous_pattern(pattern: &str) -> Option<&str> {
+    let pattern = pattern.strip_prefix("**/").unwrap_or(pattern);
+    let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+    let pattern = pattern.strip_suffix('/').unwrap_or(pattern);
+
+    let ambiguous = pattern.is_empty()
+        || pattern.contains(['*', '?', '[', ']', '/', '\\'])
+        || pattern.starts_with('#');
+
+    (!ambiguous).then_some(pattern)
+}
+
 /// Gathers the signals `assess` weighs.
 ///
-/// Reads the filesystem around the candidate and spawns no process. The Git
-/// signals are left unchecked, because answering them means running Git: an
-/// unchecked signal is honest, a guessed one is not. A caller that can afford
-/// the Git lookup fills those fields before assessing.
+/// Reads the filesystem around the candidate and spawns no process. Whether the
+/// directory is tracked by Git is left unchecked: answering it means running
+/// Git, and an unchecked signal is honest while a guessed one is not. A caller
+/// that can afford the lookup fills that field before assessing.
 pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
     let parent = path.parent();
 
@@ -76,7 +150,7 @@ pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
         known_artifact,
         project_manifest: parent.is_some_and(|parent| has_any_marker(parent, PROJECT_MANIFESTS)),
         lockfile: parent.is_some_and(|parent| has_any_marker(parent, LOCKFILES)),
-        git_ignored: None,
+        git_ignored: gitignore_signal(path),
         git_tracked: None,
         version_manager_path: is_version_manager_path(path),
         system_path: is_system_path(path),
@@ -644,6 +718,135 @@ mod tests {
             !collect_signals(Path::new("/private/var/folders/x/app/node_modules"), true)
                 .system_path
         );
+    }
+
+    fn write_ignore(directory: &std::path::Path, contents: &str) {
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join(".gitignore"), contents).unwrap();
+    }
+
+    #[test]
+    fn a_project_that_ignores_the_directory_declares_it_disposable() {
+        let root = fixture("ignored");
+        let project = root.join("app");
+        let target = project.join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        write_ignore(&project, "# deps\nnode_modules\ndist\n");
+
+        assert_eq!(gitignore_signal(&target), Some(true));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_decorations_git_users_actually_write_are_understood() {
+        let root = fixture("decorations");
+        for (index, pattern) in ["node_modules/", "/node_modules", "**/node_modules"]
+            .iter()
+            .enumerate()
+        {
+            let project = root.join(format!("app{index}"));
+            let target = project.join("node_modules");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::create_dir_all(project.join(".git")).unwrap();
+            write_ignore(&project, pattern);
+
+            assert_eq!(gitignore_signal(&target), Some(true), "{pattern}");
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_ignore_file_higher_up_still_counts() {
+        let root = fixture("monorepo");
+        let target = root.join("packages").join("web").join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        write_ignore(&root, "node_modules\n");
+
+        assert_eq!(gitignore_signal(&target), Some(true));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // The matcher must never claim a directory is undeclared. Not finding a
+    // pattern it understands means "not established", so a candidate can only
+    // lose corroboration it might have earned, never be marked as undeclared.
+    #[test]
+    fn anything_this_matcher_cannot_read_is_unanswered_rather_than_denied() {
+        let root = fixture("unanswered");
+        let cases = [
+            ("no-ignore-file", None::<&str>),
+            ("unrelated", Some("dist\nbuild\n")),
+            ("glob", Some("node_modules*\n")),
+            ("nested-path", Some("packages/*/node_modules\n")),
+            ("negated", Some("node_modules\n!node_modules\n")),
+            ("commented", Some("# node_modules\n")),
+        ];
+
+        for (name, contents) in cases {
+            let project = root.join(name);
+            let target = project.join("node_modules");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::create_dir_all(project.join(".git")).unwrap();
+            if let Some(contents) = contents {
+                write_ignore(&project, contents);
+            }
+
+            assert_eq!(gitignore_signal(&target), None, "{name}");
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_later_line_wins_over_an_earlier_negation() {
+        let root = fixture("relisted");
+        let project = root.join("app");
+        let target = project.join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        write_ignore(&project, "!node_modules\nnode_modules\n");
+
+        assert_eq!(gitignore_signal(&target), Some(true));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_search_stops_at_the_repository_root() {
+        let root = fixture("bounded");
+        let project = root.join("app");
+        let target = project.join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        // Outside the repository, so it must not be consulted.
+        write_ignore(&root, "node_modules\n");
+
+        assert_eq!(gitignore_signal(&target), None);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_declared_directory_collects_the_disposable_signal() {
+        let root = fixture("collected");
+        let project = root.join("app");
+        let target = project.join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        write_ignore(&project, "node_modules\n");
+
+        let input = collect_signals(&target, true);
+        assert_eq!(input.git_ignored, Some(true));
+        assert!(assess(input)
+            .signals
+            .contains(&ConfidenceSignal::DeclaredDisposable));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
