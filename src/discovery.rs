@@ -40,9 +40,21 @@ pub enum LocationKind {
     SharedCache,
     /// State belonging to a tool rather than to a build.
     ///
-    /// Regenerable in principle, but the boundary between scratch and real user
-    /// data inside these directories is a judgement call we have not earned
-    /// yet. Reported so the user can see the size, always at `Review`.
+    /// Two different problems land here, and both mean the same thing to the
+    /// user: look before you remove this.
+    ///
+    /// The first is content nothing regenerates, mixed in with content that
+    /// does. `~/.m2/repository` holds crates fetched from a registry next to
+    /// artifacts a local `mvn install` put there, which may be the only copy in
+    /// existence. A JetBrains cache directory holds indexes beside Local
+    /// History, the IDE's own record of edits to files that were never
+    /// committed. Both look like caches from the outside.
+    ///
+    /// The second is removal that cannot be relied on to finish. Go marks its
+    /// module cache read-only, so a permanent delete can fail partway and leave
+    /// a broken cache behind — worse than not having tried.
+    ///
+    /// Reported so the user can see the size, always at `Review`.
     ToolState,
 }
 
@@ -249,9 +261,9 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache;
     "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache;
     "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache;
-    "Maven repository" => ".m2/repository", PackageManagerCache, SharedCache;
+    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState;
     "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache;
-    "Go module cache" => "go/pkg/mod", PackageManagerCache, SharedCache;
+    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState;
     "Go build cache" => "Library/Caches/go-build", PackageManagerCache, SharedCache;
     "pip cache" => "Library/Caches/pip", PackageManagerCache, SharedCache;
     "CocoaPods cache" => "Library/Caches/CocoaPods", PackageManagerCache, SharedCache;
@@ -270,7 +282,7 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState;
     "opencode tool output" => ".local/share/opencode/tool-output", AiToolCache, ToolState;
 
-    "JetBrains caches" => "Library/Caches/JetBrains", EditorCache, Artifact;
+    "JetBrains caches" => "Library/Caches/JetBrains", EditorCache, ToolState;
     "VS Code cache" => "Library/Application Support/Code/Cache", EditorCache, Artifact;
     "VS Code cached data" => "Library/Application Support/Code/CachedData", EditorCache, Artifact;
     "VS Code GPU cache" => "Library/Application Support/Code/GPUCache", EditorCache, Artifact;
@@ -287,9 +299,9 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache;
     "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache;
     "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache;
-    "Maven repository" => ".m2/repository", PackageManagerCache, SharedCache;
+    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState;
     "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache;
-    "Go module cache" => "go/pkg/mod", PackageManagerCache, SharedCache;
+    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState;
     "Go build cache" => ".cache/go-build", PackageManagerCache, SharedCache;
     "pip cache" => ".cache/pip", PackageManagerCache, SharedCache;
     "node-gyp headers" => ".cache/node-gyp", PackageManagerCache, SharedCache;
@@ -305,7 +317,7 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState;
     "opencode tool output" => ".local/share/opencode/tool-output", AiToolCache, ToolState;
 
-    "JetBrains caches" => ".cache/JetBrains", EditorCache, Artifact;
+    "JetBrains caches" => ".cache/JetBrains", EditorCache, ToolState;
     "VS Code cache" => ".config/Code/Cache", EditorCache, Artifact;
     "VS Code cached data" => ".config/Code/CachedData", EditorCache, Artifact;
     "VS Code GPU cache" => ".config/Code/GPUCache", EditorCache, Artifact;
@@ -320,9 +332,9 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache;
     "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache;
     "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache;
-    "Maven repository" => ".m2/repository", PackageManagerCache, SharedCache;
+    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState;
     "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache;
-    "Go module cache" => "go/pkg/mod", PackageManagerCache, SharedCache;
+    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState;
     "Go build cache" => "AppData/Local/go-build", PackageManagerCache, SharedCache;
     "pip cache" => "AppData/Local/pip/Cache", PackageManagerCache, SharedCache;
     "node-gyp headers" => "AppData/Local/node-gyp/Cache", PackageManagerCache, SharedCache;
@@ -336,7 +348,7 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Codex logs" => ".codex/log", AiToolCache, ToolState;
     "opencode cache" => ".cache/opencode", AiToolCache, ToolState;
 
-    "JetBrains caches" => "AppData/Local/JetBrains", EditorCache, Artifact;
+    "JetBrains caches" => "AppData/Local/JetBrains", EditorCache, ToolState;
     "VS Code cache" => "AppData/Roaming/Code/Cache", EditorCache, Artifact;
     "VS Code cached data" => "AppData/Roaming/Code/CachedData", EditorCache, Artifact;
     "VS Code GPU cache" => "AppData/Roaming/Code/GPUCache", EditorCache, Artifact;
@@ -540,6 +552,38 @@ mod tests {
 
         assert!(scanner.matches(super::last_segment(location.relative)));
         assert!(!scanner.confirm_context(&decoy));
+    }
+
+    /// These four were catalogued as ordinary caches on the strength of their
+    /// names, and each one can destroy something nothing brings back. The names
+    /// have not changed and neither has the temptation, so the ratings are
+    /// pinned here rather than left to the next reader's judgement.
+    #[test]
+    fn the_locations_that_can_hold_originals_stay_at_review() {
+        for relative in [
+            // `mvn install` writes here; those artifacts exist nowhere else.
+            ".m2/repository",
+            // Local History lives under the cache directory. It is the record
+            // of edits to files that were never committed.
+            "Library/Caches/JetBrains",
+            ".cache/JetBrains",
+            "AppData/Local/JetBrains",
+            // Read-only by design, so a permanent delete can fail partway.
+            "go/pkg/mod",
+        ] {
+            let Some(location) = known_locations()
+                .iter()
+                .find(|location| location.relative == relative)
+            else {
+                continue; // Not catalogued on this platform.
+            };
+            assert_eq!(
+                location.kind,
+                LocationKind::ToolState,
+                "{} is rated as if everything inside it were regenerable",
+                location.label
+            );
+        }
     }
 
     #[test]
