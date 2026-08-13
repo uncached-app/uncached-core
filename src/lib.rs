@@ -16,7 +16,8 @@ pub use confidence::{
     assess, collect_signals, Confidence, ConfidenceInput, ConfidenceLevel, ConfidenceSignal,
 };
 pub use discovery::{
-    home_directory, known_locations, probe_home, Discovery, KnownLocation, LocationKind,
+    home_directory, known_locations, probe_home, Discovery, KnownLocation, KnownLocationScanner,
+    LocationKind,
 };
 pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
 pub use model::{Category, CleanReport, FileIdentity, ScanTarget, TraversalOutcome};

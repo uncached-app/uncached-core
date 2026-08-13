@@ -18,6 +18,7 @@
 
 use crate::confidence::ConfidenceInput;
 use crate::model::Category;
+use crate::scanner::{ProviderSet, Scanner};
 use std::path::{Path, PathBuf};
 
 /// What deleting a location actually costs.
@@ -132,6 +133,84 @@ pub fn signals_for(discovery: &Discovery) -> ConfidenceInput {
 /// The table, per platform.
 pub fn known_locations() -> &'static [KnownLocation] {
     PLATFORM_LOCATIONS
+}
+
+/// A provider that recognizes one category of catalogued location.
+///
+/// Discovery does not get its own way to delete things. Cleanup asks a provider
+/// to vouch for a target before touching it, and that check is the reason a
+/// misidentified directory cannot be removed, so a discovered cache has to be
+/// vouched for by a provider like anything else. This is that provider: it
+/// confirms a path by finding it in the catalogue, which is a stricter test
+/// than any name match — the whole path must be one we named in advance.
+pub struct KnownLocationScanner {
+    home: PathBuf,
+    category: Category,
+}
+
+impl KnownLocationScanner {
+    /// The provider set covering every catalogued location under `home`.
+    ///
+    /// One scanner per category, because a `ProviderSet` maps each category to
+    /// exactly one provider.
+    pub fn provider_set(home: PathBuf) -> ProviderSet {
+        let mut providers = ProviderSet::new();
+        for category in [
+            Category::XcodeDerivedData,
+            Category::PackageManagerCache,
+            Category::AiToolCache,
+            Category::EditorCache,
+        ] {
+            providers.add_scanner(Self {
+                home: home.clone(),
+                category,
+            });
+        }
+        providers
+    }
+
+    fn entries(&self) -> impl Iterator<Item = &'static KnownLocation> + '_ {
+        known_locations()
+            .iter()
+            .filter(move |location| location.category == self.category)
+    }
+}
+
+impl Scanner for KnownLocationScanner {
+    fn category(&self) -> Category {
+        self.category.clone()
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        self.entries()
+            .any(|location| last_segment(location.relative) == name)
+    }
+
+    fn confirm_context(&self, path: &Path) -> bool {
+        self.entries()
+            .any(|location| same_path(&location.resolve(&self.home), path))
+    }
+}
+
+fn last_segment(relative: &str) -> &str {
+    relative.rsplit('/').next().unwrap_or(relative)
+}
+
+/// Cleanup canonicalizes the target before asking for confirmation, while the
+/// catalogue is written in plain home-relative terms. Comparing the raw paths
+/// alone would reject every entry on a machine where the home directory is
+/// reached through a symlink.
+fn same_path(catalogued: &Path, candidate: &Path) -> bool {
+    if catalogued == candidate {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(catalogued),
+        std::fs::canonicalize(candidate),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 macro_rules! locations {
@@ -265,7 +344,10 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
 
 #[cfg(test)]
 mod tests {
-    use super::{known_locations, probe_home, signals_for, Discovery, KnownLocation, LocationKind};
+    use super::{
+        known_locations, probe_home, signals_for, Discovery, KnownLocation, KnownLocationScanner,
+        LocationKind,
+    };
     use crate::confidence::{assess, ConfidenceLevel};
     use crate::model::Category;
     use std::fs;
@@ -411,6 +493,53 @@ mod tests {
             );
             seen.push(location.relative);
         }
+    }
+
+    /// Cleanup will not touch a path no provider vouches for, so every entry in
+    /// the catalogue has to be recognized by the provider set built from it.
+    /// Without this the discovered targets would be visible and undeletable.
+    #[test]
+    fn the_provider_set_vouches_for_every_catalogued_location() {
+        let home = Home::new("providers");
+        let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
+
+        for location in known_locations() {
+            let path = home.create(location.relative);
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("fixture name should be valid UTF-8");
+            let scanner = providers
+                .scanner_for(&location.category)
+                .unwrap_or_else(|| panic!("{} has no provider", location.label));
+
+            assert!(scanner.matches(name), "{} name rejected", location.label);
+            assert!(
+                scanner.confirm_context(&path),
+                "{} context rejected",
+                location.label
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_refuses_a_path_that_is_not_in_the_catalogue() {
+        let home = Home::new("decoy");
+        let location = first_of_kind(LocationKind::SharedCache);
+        let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
+        let scanner = providers
+            .scanner_for(&location.category)
+            .expect("shared caches should have a provider");
+
+        // The right basename in the wrong place: exactly the mistake the
+        // catalogue exists to make impossible.
+        let decoy = home.create(&format!(
+            "elsewhere/{}",
+            super::last_segment(location.relative)
+        ));
+
+        assert!(scanner.matches(super::last_segment(location.relative)));
+        assert!(!scanner.confirm_context(&decoy));
     }
 
     #[test]
