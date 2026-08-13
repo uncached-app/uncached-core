@@ -11,7 +11,9 @@ mod parallel;
 mod secure_cleanup;
 
 pub use cleaner::{clean_permanently, clean_to_trash, validate_clean_target};
-pub use confidence::{assess, Confidence, ConfidenceInput, ConfidenceLevel, ConfidenceSignal};
+pub use confidence::{
+    assess, collect_signals, Confidence, ConfidenceInput, ConfidenceLevel, ConfidenceSignal,
+};
 pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
 pub use model::{Category, CleanReport, FileIdentity, ScanTarget, TraversalOutcome};
 pub use scanner::{

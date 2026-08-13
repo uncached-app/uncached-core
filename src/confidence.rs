@@ -8,7 +8,149 @@
 //! the code that decides whether something may be deleted can be tested
 //! exhaustively without a filesystem, and behaves identically on every caller.
 
+use crate::filesystem::has_marker_file;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::{Duration, SystemTime};
+
+/// Manifests that mark the parent directory as a project root.
+const PROJECT_MANIFESTS: &[&str] = &[
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+];
+
+/// Lockfiles that make the contents reproducible.
+const LOCKFILES: &[&str] = &[
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "bun.lock",
+    "Cargo.lock",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+];
+
+/// Directories owned by a runtime version manager. What lives under them was
+/// installed by the user, not produced by a build.
+const VERSION_MANAGER_DIRECTORIES: &[&str] = &[
+    ".nvm", ".volta", ".fnm", ".asdf", ".rbenv", ".pyenv", ".nodenv", ".rustup", ".sdkman",
+];
+
+/// Roots owned by the operating system rather than by a user's projects.
+///
+/// `/var` is deliberately absent: macOS keeps per-user temporary directories
+/// under `/private/var`, so treating it as a system path would mislabel
+/// ordinary scratch space. Deletion under critical directories is refused by
+/// `filesystem::is_safe_to_delete` regardless of what confidence reports.
+#[cfg(not(windows))]
+const SYSTEM_ROOTS: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/etc",
+    "/opt",
+    "/System",
+    "/Library",
+    "/Applications",
+];
+
+const RECENT_WRITE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Gathers the signals `assess` weighs.
+///
+/// Reads the filesystem around the candidate and spawns no process. The Git
+/// signals are left unchecked, because answering them means running Git: an
+/// unchecked signal is honest, a guessed one is not. A caller that can afford
+/// the Git lookup fills those fields before assessing.
+pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
+    let parent = path.parent();
+
+    ConfidenceInput {
+        known_artifact,
+        project_manifest: parent.is_some_and(|parent| has_any_marker(parent, PROJECT_MANIFESTS)),
+        lockfile: parent.is_some_and(|parent| has_any_marker(parent, LOCKFILES)),
+        git_ignored: None,
+        git_tracked: None,
+        version_manager_path: is_version_manager_path(path),
+        system_path: is_system_path(path),
+        recently_modified: was_modified_recently(path),
+    }
+}
+
+fn has_any_marker(parent: &Path, names: &[&str]) -> bool {
+    names.iter().any(|name| has_marker_file(parent, name))
+}
+
+fn is_version_manager_path(path: &Path) -> bool {
+    let components = lowercase_components(path);
+
+    if components
+        .iter()
+        .any(|component| VERSION_MANAGER_DIRECTORIES.contains(&component.as_str()))
+    {
+        return true;
+    }
+
+    // nvm-windows and older installs drop the leading dot, so the directory
+    // name alone is too common to trust. A version directory next to it is not.
+    components.windows(2).any(|window| {
+        (window[0] == "nvm" && is_version_directory(&window[1]))
+            || (window[0] == "pnpm" && window[1] == "global")
+            || (window[0] == ".bun" && window[1] == "install")
+    })
+}
+
+fn is_version_directory(name: &str) -> bool {
+    let digits = name.strip_prefix('v').unwrap_or(name);
+    !digits.is_empty()
+        && digits
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+}
+
+#[cfg(not(windows))]
+fn is_system_path(path: &Path) -> bool {
+    SYSTEM_ROOTS
+        .iter()
+        .any(|root| path.starts_with(root) && path != Path::new(root))
+}
+
+#[cfg(windows)]
+fn is_system_path(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().to_lowercase();
+    [
+        std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string()),
+        std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string()),
+        std::env::var("ProgramFiles(x86)")
+            .unwrap_or_else(|_| r"C:\Program Files (x86)".to_string()),
+    ]
+    .iter()
+    .any(|root| {
+        let root = root.trim_end_matches(['\\', '/']).to_lowercase();
+        normalized.starts_with(&(root + "\\"))
+    })
+}
+
+fn lowercase_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
+}
+
+fn was_modified_recently(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|elapsed| elapsed < RECENT_WRITE_WINDOW)
+}
 
 /// What the user sees. The score behind it stays internal so thresholds can be
 /// tuned without turning into a number the UI has to explain.
@@ -352,6 +494,123 @@ mod tests {
 
         assert_eq!(value["level"], "high");
         assert_eq!(value["signals"][0], "knownArtifact");
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "uncached-confidence-{}-{}-{:?}",
+            name,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    #[test]
+    fn collects_manifest_and_lockfile_from_the_parent_directory() {
+        let root = fixture("manifest");
+        let project = root.join("app");
+        let target = project.join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        std::fs::write(project.join("pnpm-lock.yaml"), b"").unwrap();
+
+        let input = collect_signals(&target, true);
+
+        assert!(input.project_manifest);
+        assert!(input.lockfile);
+        assert!(!input.version_manager_path);
+        // Git costs a subprocess, so collection leaves it unanswered.
+        assert_eq!(input.git_ignored, None);
+        assert_eq!(input.git_tracked, None);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_directory_without_a_project_around_it_collects_nothing_supporting() {
+        let root = fixture("bare");
+        let target = root.join("some-cache");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let input = collect_signals(&target, false);
+
+        assert!(!input.project_manifest);
+        assert!(!input.lockfile);
+        assert_eq!(assess(input).level, ConfidenceLevel::Review);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_freshly_written_directory_reads_as_recently_modified() {
+        let root = fixture("recent");
+        let target = root.join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+
+        assert!(collect_signals(&target, true).recently_modified);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn global_install_directories_are_recognized_without_touching_disk() {
+        let version_manager_paths = [
+            "/home/dev/.nvm/versions/node/v20.11.0/lib/node_modules",
+            "/home/dev/.volta/tools/image/node/20.11.0/lib/node_modules",
+            "/home/dev/.asdf/installs/nodejs/20.11.0/lib/node_modules",
+            "/home/dev/.fnm/node-versions/v20.11.0/installation/lib/node_modules",
+            "/home/dev/.local/share/pnpm/global/5/node_modules",
+            "/home/dev/.bun/install/global/node_modules",
+        ];
+
+        for path in version_manager_paths {
+            let input = collect_signals(Path::new(path), true);
+            assert!(input.version_manager_path, "not detected: {path}");
+            assert_eq!(assess(input).level, ConfidenceLevel::Review, "{path}");
+        }
+    }
+
+    // Only Windows splits this into components; on Unix the whole string is a
+    // single component and the path is meaningless.
+    #[cfg(windows)]
+    #[test]
+    fn nvm_for_windows_is_recognized_by_its_version_directory() {
+        let input = collect_signals(
+            Path::new(r"C:\Users\dev\AppData\Roaming\nvm\v20.11.0\node_modules"),
+            true,
+        );
+
+        assert!(input.version_manager_path);
+        assert_eq!(assess(input).level, ConfidenceLevel::Review);
+    }
+
+    #[test]
+    fn a_project_named_after_a_tool_is_not_a_version_manager_path() {
+        for path in [
+            "/home/dev/Projects/nvm/node_modules",
+            "/home/dev/Projects/pnpm-utils/node_modules",
+            "/home/dev/Projects/bun-app/node_modules",
+        ] {
+            assert!(
+                !collect_signals(Path::new(path), true).version_manager_path,
+                "false positive: {path}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn system_roots_are_flagged_but_ordinary_home_paths_are_not() {
+        assert!(collect_signals(Path::new("/usr/lib/node_modules"), true).system_path);
+        assert!(collect_signals(Path::new("/Library/Caches/node_modules"), true).system_path);
+        assert!(!collect_signals(Path::new("/home/dev/app/node_modules"), true).system_path);
+        // macOS keeps per-user temporary directories under /private/var.
+        assert!(
+            !collect_signals(Path::new("/private/var/folders/x/app/node_modules"), true)
+                .system_path
+        );
     }
 
     #[test]
