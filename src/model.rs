@@ -20,6 +20,49 @@ pub enum Category {
     XcodeDerivedData,
     SwiftBuild,
     DartTool,
+    /// Maven's `target`, confirmed by the POM beside it.
+    MavenTarget,
+    /// Gradle's per-project `build`, distinct from the `.gradle` cache.
+    GradleBuild,
+    /// sbt's `target`, at the root and under `project/`.
+    SbtTarget,
+    /// CMake's out-of-source build trees, including the ones JetBrains IDEs
+    /// generate per configuration.
+    CMakeBuild,
+    /// Nuxt's build state.
+    NuxtCache,
+    /// SvelteKit's generated app.
+    SvelteKitCache,
+    /// Flutter's `build` and the per-platform ephemeral directories.
+    FlutterBuild,
+    /// Mix's compiled output and the language servers' state beside it.
+    ///
+    /// `deps/` is deliberately absent: fetched dependencies cost network to
+    /// restore, which puts them in a different class from compiled output.
+    ElixirBuild,
+    /// Stack and Cabal build trees.
+    HaskellBuild,
+    /// Zig's build output and compilation cache.
+    ZigCache,
+    /// Unity's imported asset database and scratch directories.
+    UnityLibrary,
+    /// Unreal's generated build state.
+    UnrealIntermediate,
+    /// Godot 4's import cache and editor state.
+    GodotCache,
+    /// Notebook checkpoints written beside the notebook itself.
+    JupyterCheckpoints,
+    /// Pixi's per-project environment.
+    PixiEnv,
+    /// Composer's installed PHP packages.
+    ComposerVendor,
+    /// Terraform's downloaded providers and modules.
+    TerraformDir,
+    /// CocoaPods' installed pods.
+    CocoapodsPods,
+    /// React Native's caches and its per-platform build directories, which are
+    /// only artifacts inside `ios/` and `android/` of an RN project.
+    ReactNative,
     /// A registry, store or download cache shared by every project on the
     /// machine. Distinct from an artifact because emptying it also slows down
     /// every future restore, which is the opposite of what a cleaner is for.
@@ -49,6 +92,25 @@ impl Category {
             Self::XcodeDerivedData => "XcodeDerivedData".to_owned(),
             Self::SwiftBuild => "SwiftBuild".to_owned(),
             Self::DartTool => "DartTool".to_owned(),
+            Self::MavenTarget => "MavenTarget".to_owned(),
+            Self::GradleBuild => "GradleBuild".to_owned(),
+            Self::SbtTarget => "SbtTarget".to_owned(),
+            Self::CMakeBuild => "CMakeBuild".to_owned(),
+            Self::NuxtCache => "NuxtCache".to_owned(),
+            Self::SvelteKitCache => "SvelteKitCache".to_owned(),
+            Self::FlutterBuild => "FlutterBuild".to_owned(),
+            Self::ElixirBuild => "ElixirBuild".to_owned(),
+            Self::HaskellBuild => "HaskellBuild".to_owned(),
+            Self::ZigCache => "ZigCache".to_owned(),
+            Self::UnityLibrary => "UnityLibrary".to_owned(),
+            Self::UnrealIntermediate => "UnrealIntermediate".to_owned(),
+            Self::GodotCache => "GodotCache".to_owned(),
+            Self::JupyterCheckpoints => "JupyterCheckpoints".to_owned(),
+            Self::PixiEnv => "PixiEnv".to_owned(),
+            Self::ComposerVendor => "ComposerVendor".to_owned(),
+            Self::TerraformDir => "TerraformDir".to_owned(),
+            Self::CocoapodsPods => "CocoapodsPods".to_owned(),
+            Self::ReactNative => "ReactNative".to_owned(),
             Self::PackageManagerCache => "PackageManagerCache".to_owned(),
             Self::AiToolCache => "AiToolCache".to_owned(),
             Self::EditorCache => "EditorCache".to_owned(),
@@ -76,6 +138,25 @@ impl Category {
             "XcodeDerivedData" => Self::XcodeDerivedData,
             "SwiftBuild" => Self::SwiftBuild,
             "DartTool" => Self::DartTool,
+            "MavenTarget" => Self::MavenTarget,
+            "GradleBuild" => Self::GradleBuild,
+            "SbtTarget" => Self::SbtTarget,
+            "CMakeBuild" => Self::CMakeBuild,
+            "NuxtCache" => Self::NuxtCache,
+            "SvelteKitCache" => Self::SvelteKitCache,
+            "FlutterBuild" => Self::FlutterBuild,
+            "ElixirBuild" => Self::ElixirBuild,
+            "HaskellBuild" => Self::HaskellBuild,
+            "ZigCache" => Self::ZigCache,
+            "UnityLibrary" => Self::UnityLibrary,
+            "UnrealIntermediate" => Self::UnrealIntermediate,
+            "GodotCache" => Self::GodotCache,
+            "JupyterCheckpoints" => Self::JupyterCheckpoints,
+            "PixiEnv" => Self::PixiEnv,
+            "ComposerVendor" => Self::ComposerVendor,
+            "TerraformDir" => Self::TerraformDir,
+            "CocoapodsPods" => Self::CocoapodsPods,
+            "ReactNative" => Self::ReactNative,
             "PackageManagerCache" => Self::PackageManagerCache,
             "AiToolCache" => Self::AiToolCache,
             "EditorCache" => Self::EditorCache,

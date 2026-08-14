@@ -37,7 +37,7 @@ impl Scanner for SwiftBuildScanner {
     }
 
     fn matches(&self, name: &str) -> bool {
-        name == ".build"
+        name == ".build" || name == ".swiftpm"
     }
 
     fn confirm_context(&self, path: &Path) -> bool {

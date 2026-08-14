@@ -1,13 +1,16 @@
 pub(crate) mod cargo_target;
 pub(crate) mod dotnet;
+pub mod ecosystems;
 pub(crate) mod gradle;
 pub(crate) mod next;
 pub(crate) mod node_modules;
+pub(crate) mod project;
 pub(crate) mod python_cache;
 pub(crate) mod turbo;
 pub(crate) mod xcode;
 
 pub use cargo_target::CargoTargetScanner;
+pub use project::{ProjectMarker, ProjectScanner};
 pub use dotnet::{DartToolScanner, DotNetObjScanner};
 pub use gradle::GradleScanner;
 pub use next::NextCacheScanner;

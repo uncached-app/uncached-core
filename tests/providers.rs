@@ -36,6 +36,9 @@ fn all_registers_every_scanner_in_deterministic_order() {
     let providers = ProviderSet::all();
 
     let expected = [
+        // React Native leads: it claims paths inside `ios/` and `android/`
+        // that the platform's own tooling would otherwise claim by bare name.
+        Category::ReactNative,
         Category::NodeModules,
         Category::CargoTarget,
         Category::NextJs,
@@ -46,6 +49,24 @@ fn all_registers_every_scanner_in_deterministic_order() {
         Category::SwiftBuild,
         Category::DotNetObj,
         Category::DartTool,
+        Category::MavenTarget,
+        Category::SbtTarget,
+        Category::GradleBuild,
+        Category::CMakeBuild,
+        Category::UnityLibrary,
+        Category::UnrealIntermediate,
+        Category::GodotCache,
+        Category::ElixirBuild,
+        Category::HaskellBuild,
+        Category::ZigCache,
+        Category::FlutterBuild,
+        Category::JupyterCheckpoints,
+        Category::PixiEnv,
+        Category::ComposerVendor,
+        Category::TerraformDir,
+        Category::CocoapodsPods,
+        Category::NuxtCache,
+        Category::SvelteKitCache,
     ];
     assert_eq!(providers.len(), expected.len());
     assert_eq!(providers.categories().collect::<Vec<_>>(), expected);
@@ -359,4 +380,96 @@ fn cleanup_refuses_a_target_a_rule_excludes() {
         "unexpected error: {error:?}"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+/// The names these providers claim are also ordinary directory names, and one
+/// of them is `Library`. Each has to be refused without its ecosystem's marker
+/// directly beside it, or the provider is a liability rather than a feature.
+#[test]
+fn a_dangerous_name_is_refused_without_its_project_marker() {
+    let root = fixture();
+
+    // Unity's names, with and without the project file Unity generates.
+    fs::create_dir_all(root.join("home/Library")).unwrap();
+    fs::create_dir_all(root.join("game/Library")).unwrap();
+    fs::write(root.join("game/Assembly-CSharp.csproj"), b"<Project/>").unwrap();
+
+    // `vendor` is Composer's only with a composer.json beside it.
+    fs::create_dir_all(root.join("notes/vendor")).unwrap();
+    fs::create_dir_all(root.join("php/vendor")).unwrap();
+    fs::write(root.join("php/composer.json"), b"{}").unwrap();
+
+    // `build` belongs to whichever ecosystem's marker is present.
+    fs::create_dir_all(root.join("plain/build")).unwrap();
+    fs::create_dir_all(root.join("cmake/build")).unwrap();
+    fs::write(root.join("cmake/CMakeLists.txt"), b"project(x)").unwrap();
+
+    let found = categories(&root, &ProviderSet::all());
+
+    assert_eq!(
+        found.iter().filter(|c| **c == Category::UnityLibrary).count(),
+        1,
+        "only the directory beside Assembly-CSharp.csproj is Unity's"
+    );
+    assert_eq!(
+        found
+            .iter()
+            .filter(|c| **c == Category::ComposerVendor)
+            .count(),
+        1
+    );
+    assert_eq!(
+        found.iter().filter(|c| **c == Category::CMakeBuild).count(),
+        1
+    );
+}
+
+/// Kondo does not remove virtual environments, and neither do we: the names are
+/// ordinary words and rebuilding one costs network.
+#[test]
+fn no_provider_claims_a_python_virtual_environment() {
+    let root = fixture();
+
+    for name in ["venv", ".venv", "env", "virtualenv"] {
+        fs::create_dir_all(root.join(format!("project/{name}/lib"))).unwrap();
+        fs::write(root.join(format!("project/{name}/pyvenv.cfg")), b"home = /usr").unwrap();
+    }
+    fs::write(root.join("project/pyproject.toml"), b"[project]").unwrap();
+    fs::create_dir_all(root.join("project/build")).unwrap();
+    fs::create_dir_all(root.join("project/dist")).unwrap();
+    fs::create_dir_all(root.join("project/__pycache__")).unwrap();
+
+    let found = categories(&root, &ProviderSet::all());
+
+    assert_eq!(
+        found,
+        vec![Category::PyCache],
+        "only the cache is claimed: not the environments, not build, not dist"
+    );
+}
+
+/// A nested artifact is claimed where the ecosystem puts it and nowhere else.
+#[test]
+fn a_nested_artifact_is_claimed_only_at_its_own_path() {
+    let root = fixture();
+
+    fs::create_dir_all(root.join("app/ios")).unwrap();
+    fs::create_dir_all(root.join("app/ios/Pods")).unwrap();
+    fs::write(root.join("app/package.json"), b"{}").unwrap();
+
+    // The same name at the project root, where React Native never puts it.
+    fs::create_dir_all(root.join("app/Pods")).unwrap();
+
+    let found = categories(&root, &ProviderSet::all());
+
+    assert!(found.contains(&Category::ReactNative));
+    assert_eq!(
+        found.iter().filter(|c| **c == Category::ReactNative).count(),
+        1,
+        "the bare Pods at the root is not React Native's"
+    );
+    assert!(
+        !found.contains(&Category::CocoapodsPods),
+        "no Podfile, so CocoaPods claims nothing either"
+    );
 }

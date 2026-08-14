@@ -6,9 +6,9 @@ use crate::model::{Category, FileIdentity};
 use std::path::{Path, PathBuf};
 
 pub use providers::{
-    CargoTargetScanner, DartToolScanner, DotNetObjScanner, GradleScanner, NextCacheScanner,
-    NodeModulesScanner, PyCacheScanner, SwiftBuildScanner, TurboCacheScanner,
-    XcodeDerivedDataScanner,
+    ecosystems, CargoTargetScanner, DartToolScanner, DotNetObjScanner, GradleScanner,
+    NextCacheScanner, NodeModulesScanner, ProjectMarker, ProjectScanner, PyCacheScanner,
+    SwiftBuildScanner, TurboCacheScanner, XcodeDerivedDataScanner,
 };
 #[cfg(feature = "bench")]
 pub use pruning::PrunedPaths;
@@ -102,8 +102,12 @@ impl ProviderSet {
     }
 
     pub fn all() -> Self {
-        Self {
+        let mut set = Self {
             scanners: vec![
+                // React Native first: it claims paths inside `ios/` and
+                // `android/` that Gradle and CocoaPods would otherwise claim by
+                // their bare names, and the first provider to confirm wins.
+                Box::new(providers::ecosystems::react_native()),
                 Box::new(NodeModulesScanner),
                 Box::new(CargoTargetScanner),
                 Box::new(NextCacheScanner),
@@ -116,15 +120,20 @@ impl ProviderSet {
                 Box::new(DartToolScanner),
             ],
             ignore_rules: crate::ignore_rules::IgnoreRules::default(),
+        };
+        for scanner in providers::ecosystems::all() {
+            set.add_scanner(scanner);
         }
+        set
     }
 
     /// Returns only providers that require project context before classifying a
     /// directory. This is the conservative policy for callers where deleting a
     /// same-named directory is more dangerous than missing a cache.
     pub fn all_contextual() -> Self {
-        Self {
+        let mut set = Self {
             scanners: vec![
+                Box::new(providers::ecosystems::react_native()),
                 Box::new(NodeModulesScanner),
                 Box::new(CargoTargetScanner),
                 Box::new(NextCacheScanner),
@@ -135,7 +144,13 @@ impl ProviderSet {
                 Box::new(DartToolScanner),
             ],
             ignore_rules: crate::ignore_rules::IgnoreRules::default(),
+        };
+        // Every project-type provider requires its ecosystem's marker beside
+        // the directory, which is exactly the property this set selects for.
+        for scanner in providers::ecosystems::all() {
+            set.add_scanner(scanner);
         }
+        set
     }
 
     pub fn len(&self) -> usize {

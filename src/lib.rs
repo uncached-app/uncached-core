@@ -24,9 +24,10 @@ pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
 pub use ignore_rules::{IgnoreRuleError, IgnoreRules};
 pub use model::{Category, CleanReport, FileIdentity, ScanTarget, TraversalOutcome};
 pub use scanner::{
-    traverse_workspace, CargoTargetScanner, DartToolScanner, DotNetObjScanner, GradleScanner,
-    NextCacheScanner, NodeModulesScanner, ProviderSet, PyCacheScanner, Scanner, SwiftBuildScanner,
-    TraversalControl, TraversalEntry, TurboCacheScanner, XcodeDerivedDataScanner,
+    ecosystems, traverse_workspace, CargoTargetScanner, DartToolScanner, DotNetObjScanner,
+    GradleScanner, NextCacheScanner, NodeModulesScanner, ProjectMarker, ProjectScanner,
+    ProviderSet, PyCacheScanner, Scanner, SwiftBuildScanner, TraversalControl, TraversalEntry,
+    TurboCacheScanner, XcodeDerivedDataScanner,
 };
 
 pub fn cleanup_capabilities() -> contract::v1::CleanupCapabilities {
