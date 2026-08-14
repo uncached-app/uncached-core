@@ -1,6 +1,6 @@
 use super::pruning::{should_prune_directory, PrunedPaths};
 use super::{ProviderSet, TraversalControl, TraversalEntry};
-use crate::error::{CoreError, CoreResult};
+use crate::error::CoreResult;
 use crate::filesystem::{canonical_workspace, file_identity};
 use crate::model::TraversalOutcome;
 use jwalk::{Parallelism, WalkDir};
@@ -50,11 +50,18 @@ where
         })
         .into_iter();
     let mut pruned = PrunedPaths::default();
+    let mut unreadable = 0usize;
     for result in entries {
         if cancelled.load(Ordering::Acquire) {
             return Ok(TraversalOutcome::Cancelled);
         }
-        let entry = result.map_err(|error| CoreError::Io(error.into()))?;
+        // A directory the operating system withholds is skipped, not fatal: on a
+        // whole-disk scan one protected folder would otherwise cost every
+        // artifact found before it. The count says the reading is partial.
+        let Ok(entry) = result else {
+            unreadable += 1;
+            continue;
+        };
         let path = entry.path();
         if pruned.contains_ancestor(&path) {
             continue;
@@ -65,6 +72,13 @@ where
         if providers.excludes(&path) {
             pruned.insert(path);
             continue;
+        }
+        // The walker reports a directory it could not open on the directory
+        // itself, so an unreadable subtree arrives as an entry carrying an error
+        // rather than as a failed one. Counted after the pruning, so a subtree
+        // nobody wanted to search is not reported as one that was lost.
+        if entry.read_children_error.is_some() {
+            unreadable += 1;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let category = providers.classify(&name, &path);
@@ -81,5 +95,5 @@ where
             TraversalControl::Continue => {}
         }
     }
-    Ok(TraversalOutcome::Completed)
+    Ok(TraversalOutcome::Completed { unreadable })
 }

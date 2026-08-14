@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraversalOutcome {
-    Completed,
+    /// `unreadable` counts directories the walk could not open. They are skipped
+    /// rather than failing the walk, so the result may be missing artifacts.
+    Completed { unreadable: usize },
     Cancelled,
 }
 
