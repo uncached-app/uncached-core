@@ -461,7 +461,9 @@ pub fn assess(input: ConfidenceInput) -> Confidence {
         match kind {
             LocationKind::Artifact => {}
             LocationKind::SharedCache => signals.push(ConfidenceSignal::SharedCache),
-            LocationKind::ToolState => signals.push(ConfidenceSignal::ToolState),
+            LocationKind::ToolState | LocationKind::ReportOnly => {
+                signals.push(ConfidenceSignal::ToolState)
+            }
         }
     }
     if input.project_manifest {
@@ -506,7 +508,9 @@ fn ceiling_for(kind: Option<LocationKind>) -> ConfidenceLevel {
     match kind {
         None | Some(LocationKind::Artifact) => ConfidenceLevel::High,
         Some(LocationKind::SharedCache) => ConfidenceLevel::Medium,
-        Some(LocationKind::ToolState) => ConfidenceLevel::Review,
+        // ReportOnly sits at the same ceiling for a different reason: nothing
+        // will delete it, so the level only has to say "look at this".
+        Some(LocationKind::ToolState) | Some(LocationKind::ReportOnly) => ConfidenceLevel::Review,
     }
 }
 

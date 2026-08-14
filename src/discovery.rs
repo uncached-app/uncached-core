@@ -56,6 +56,22 @@ pub enum LocationKind {
     ///
     /// Reported so the user can see the size, always at `Review`.
     ToolState,
+    /// Weight worth knowing about that this product will not remove.
+    ///
+    /// Some of the largest directories a developer owns are neither artifacts
+    /// nor caches: a simulator device holds whatever was installed and
+    /// configured inside it, and an Xcode archive holds the dSYMs that are the
+    /// only way to symbolicate a crash from a release already in users' hands.
+    /// Deleting either is a real decision with a real cost, and the tool that
+    /// wrote them usually has a safer way to reclaim the space than removing
+    /// the directory — `xcrun simctl delete unavailable` prunes exactly the
+    /// devices macOS orphaned and leaves the rest alone.
+    ///
+    /// So the entry exists to report the size and name that operation. No
+    /// provider vouches for it, which means cleanup refuses it at the same gate
+    /// that refuses a misidentified path: the guarantee is structural, not a
+    /// button that happens to be hidden.
+    ReportOnly,
 }
 
 /// One entry of the table: a path we can name, under a tool we can name.
@@ -189,10 +205,17 @@ impl KnownLocationScanner {
         providers
     }
 
+    /// The entries this provider will vouch for.
+    ///
+    /// `ReportOnly` is filtered out here rather than anywhere nearer the UI.
+    /// Cleanup asks a provider to confirm a path before touching it, so an
+    /// entry no provider claims cannot be deleted through any code path — the
+    /// same refusal a misidentified directory gets. Hiding the button would
+    /// have been a decision the interface could forget to make.
     fn entries(&self) -> impl Iterator<Item = &'static KnownLocation> + '_ {
-        known_locations()
-            .iter()
-            .filter(move |location| location.category == self.category)
+        known_locations().iter().filter(move |location| {
+            location.category == self.category && location.kind != LocationKind::ReportOnly
+        })
     }
 }
 
@@ -245,16 +268,19 @@ macro_rules! locations {
 }
 
 use Category::{AiToolCache, EditorCache, PackageManagerCache, XcodeDerivedData};
-use LocationKind::{Artifact, SharedCache, ToolState};
+use LocationKind::{Artifact, ReportOnly, SharedCache, ToolState};
 
-// Two Xcode directories are deliberately absent. `Archives` holds shipped
-// builds and their dSYMs, which are the only way to symbolicate a crash report
-// from a release already in users' hands; nothing regenerates those. And
-// `CoreSimulator/Devices` holds simulator state, including whatever a developer
-// installed and configured there. `CoreSimulator/Caches` next to it is fine.
+// `Archives` and `CoreSimulator/Devices` are catalogued as `ReportOnly`. They
+// are usually the two heaviest directories Xcode owns, and neither is ours to
+// remove: an archive holds the dSYMs that symbolicate crashes from a release
+// already in users' hands, and a simulator device holds whatever was installed
+// and configured inside it. Both name the operation that reclaims them safely.
+// `CoreSimulator/Caches` next to them is an ordinary artifact.
 #[cfg(target_os = "macos")]
 static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Xcode DerivedData" => "Library/Developer/Xcode/DerivedData", XcodeDerivedData, Artifact;
+    "Simulator devices" => "Library/Developer/CoreSimulator/Devices", XcodeDerivedData, ReportOnly;
+    "Xcode archives" => "Library/Developer/Xcode/Archives", XcodeDerivedData, ReportOnly;
     "Xcode iOS device support" => "Library/Developer/Xcode/iOS DeviceSupport", XcodeDerivedData, Artifact;
     "Xcode watchOS device support" => "Library/Developer/Xcode/watchOS DeviceSupport", XcodeDerivedData, Artifact;
     "Xcode tvOS device support" => "Library/Developer/Xcode/tvOS DeviceSupport", XcodeDerivedData, Artifact;
@@ -519,15 +545,19 @@ mod tests {
         }
     }
 
-    /// Cleanup will not touch a path no provider vouches for, so every entry in
-    /// the catalogue has to be recognized by the provider set built from it.
-    /// Without this the discovered targets would be visible and undeletable.
+    /// Cleanup will not touch a path no provider vouches for, so every entry
+    /// meant to be cleanable has to be recognized by the provider set built
+    /// from the catalogue. Without this the targets would be visible and
+    /// undeletable — reported as removable, and then refused.
     #[test]
-    fn the_provider_set_vouches_for_every_catalogued_location() {
+    fn the_provider_set_vouches_for_every_cleanable_location() {
         let home = Home::new("providers");
         let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
 
         for location in known_locations() {
+            if location.kind == LocationKind::ReportOnly {
+                continue;
+            }
             let path = home.create(location.relative);
             let name = path
                 .file_name()
@@ -544,6 +574,40 @@ mod tests {
                 location.label
             );
         }
+    }
+
+    /// The other half of the same rule, and the one that carries the promise: a
+    /// `ReportOnly` entry is refused by the provider that owns its category, so
+    /// cleanup cannot remove it through any path. The interface never has to
+    /// remember to hide a button.
+    #[test]
+    fn no_provider_vouches_for_a_report_only_location() {
+        let home = Home::new("report-only");
+        let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
+        let mut checked = 0;
+
+        for location in known_locations() {
+            if location.kind != LocationKind::ReportOnly {
+                continue;
+            }
+            checked += 1;
+            let path = home.create(location.relative);
+            let Some(scanner) = providers.scanner_for(&location.category) else {
+                continue;
+            };
+            assert!(
+                !scanner.confirm_context(&path),
+                "{} must never be confirmed for deletion",
+                location.label
+            );
+        }
+
+        // Guards the guard: a catalogue that lost its `ReportOnly` entries would
+        // otherwise pass this test by checking nothing.
+        assert!(
+            checked > 0 || cfg!(not(target_os = "macos")),
+            "the macOS catalogue should carry report-only entries"
+        );
     }
 
     #[test]
