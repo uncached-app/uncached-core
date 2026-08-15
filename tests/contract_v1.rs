@@ -292,6 +292,7 @@ fn settled_scan_and_cleanup_dtos_have_stable_fields() {
         total_targets: 2,
         total_bytes_found: 42,
         duration_ms: 7,
+        unreadable: 3,
     })
     .unwrap();
     assert_eq!(
@@ -300,7 +301,8 @@ fn settled_scan_and_cleanup_dtos_have_stable_fields() {
             "scanId": "scan-1",
             "totalTargets": 2,
             "totalBytesFound": 42,
-            "durationMs": 7
+            "durationMs": 7,
+            "unreadable": 3
         })
     );
 
@@ -629,4 +631,22 @@ fn unsupported_platform_capabilities_are_fail_closed() {
             secure_identity: false,
         }
     );
+}
+
+/// A finished payload written before `unreadable` existed still deserializes,
+/// and reads as "none were withheld" rather than failing the whole event.
+///
+/// That is the whole reason the field is defaulted: a consumer pinned to an
+/// older core is the ordinary state of this repository, not an edge case.
+#[test]
+fn a_finished_payload_without_the_unreadable_count_still_loads() {
+    let older: ScanFinishedDto = serde_json::from_value(json!({
+        "scanId": "scan-1",
+        "totalTargets": 2,
+        "totalBytesFound": 42,
+        "durationMs": 7
+    }))
+    .expect("a payload predating the field is not a broken payload");
+
+    assert_eq!(older.unreadable, 0);
 }

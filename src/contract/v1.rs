@@ -275,6 +275,17 @@ pub struct ScanFinishedDto {
     pub total_targets: u64,
     pub total_bytes_found: u64,
     pub duration_ms: u128,
+    /// Directories the walk was not allowed to open.
+    ///
+    /// `TraversalOutcome::Completed` has carried this since the walk learned to
+    /// step over a folder instead of failing on it, and it stopped at the edge
+    /// of the crate. Without it on the wire, a consumer has a target count and
+    /// a byte total with no way to know either is short — and on macOS without
+    /// Full Disk Access, short is the ordinary case rather than the unlucky one.
+    ///
+    /// Defaulted so a payload written before this field still deserializes.
+    #[serde(default)]
+    pub unreadable: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -10,11 +10,11 @@ pub(crate) mod turbo;
 pub(crate) mod xcode;
 
 pub use cargo_target::CargoTargetScanner;
-pub use project::{ProjectMarker, ProjectScanner};
 pub use dotnet::{DartToolScanner, DotNetObjScanner};
 pub use gradle::GradleScanner;
 pub use next::NextCacheScanner;
 pub use node_modules::NodeModulesScanner;
+pub use project::{ProjectMarker, ProjectScanner};
 pub use python_cache::PyCacheScanner;
 pub use turbo::TurboCacheScanner;
 pub use xcode::{SwiftBuildScanner, XcodeDerivedDataScanner};

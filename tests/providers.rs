@@ -407,7 +407,10 @@ fn a_dangerous_name_is_refused_without_its_project_marker() {
     let found = categories(&root, &ProviderSet::all());
 
     assert_eq!(
-        found.iter().filter(|c| **c == Category::UnityLibrary).count(),
+        found
+            .iter()
+            .filter(|c| **c == Category::UnityLibrary)
+            .count(),
         1,
         "only the directory beside Assembly-CSharp.csproj is Unity's"
     );
@@ -432,7 +435,11 @@ fn no_provider_claims_a_python_virtual_environment() {
 
     for name in ["venv", ".venv", "env", "virtualenv"] {
         fs::create_dir_all(root.join(format!("project/{name}/lib"))).unwrap();
-        fs::write(root.join(format!("project/{name}/pyvenv.cfg")), b"home = /usr").unwrap();
+        fs::write(
+            root.join(format!("project/{name}/pyvenv.cfg")),
+            b"home = /usr",
+        )
+        .unwrap();
     }
     fs::write(root.join("project/pyproject.toml"), b"[project]").unwrap();
     fs::create_dir_all(root.join("project/build")).unwrap();
@@ -464,7 +471,10 @@ fn a_nested_artifact_is_claimed_only_at_its_own_path() {
 
     assert!(found.contains(&Category::ReactNative));
     assert_eq!(
-        found.iter().filter(|c| **c == Category::ReactNative).count(),
+        found
+            .iter()
+            .filter(|c| **c == Category::ReactNative)
+            .count(),
         1,
         "the bare Pods at the root is not React Native's"
     );
