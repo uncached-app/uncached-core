@@ -1,15 +1,13 @@
 name: CI
 
+# Nothing runs on a push. Only when asked.
+#
+#   gh workflow run ci.yml --repo uncached-app/uncached-core
+#
+# Worth asking before bumping the revision the desktop pins, since that is the
+# moment this crate's Windows behaviour reaches an app.
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-    # Prose does not compile.
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE"
+  workflow_dispatch:
 
 permissions:
   contents: read
