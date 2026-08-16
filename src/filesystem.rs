@@ -12,7 +12,7 @@ pub fn canonical_workspace(root: &Path) -> CoreResult<PathBuf> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(CoreError::InvalidWorkspace(root.display().to_string()));
     }
-    let canonical = fs::canonicalize(root).map_err(CoreError::from)?;
+    let canonical = dunce::canonicalize(root).map_err(CoreError::from)?;
     #[cfg(target_os = "linux")]
     if is_protected_linux_workspace(&canonical) {
         return Err(CoreError::InvalidWorkspace(canonical.display().to_string()));

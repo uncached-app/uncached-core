@@ -193,7 +193,7 @@ fn resolve_plain_path(pattern: &str) -> Option<String> {
     if pattern.contains(['*', '?', '[', ']', '{', '}']) {
         return None;
     }
-    let canonical = std::fs::canonicalize(pattern).ok()?;
+    let canonical = dunce::canonicalize(pattern).ok()?;
     let text = canonical.to_str()?.to_owned();
     // A resolved path carrying glob syntax of its own would change what the
     // rule means, so keep the literal the user wrote instead.

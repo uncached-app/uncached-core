@@ -7,6 +7,14 @@ edition = "2021"
 bench = []
 
 [dependencies]
+# `fs::canonicalize` on Windows always returns the extended-length form,
+# `\\?\C:\work`. Every API accepts it, and it is also what the user reads on
+# screen beside every project — a prefix naming nowhere they have ever been.
+# `dunce` gives the ordinary form whenever one exists and the verbatim one when
+# it is genuinely required: past 260 characters, or on a reserved name. On every
+# other platform it is a direct call to `fs::canonicalize`, which is why it is
+# not behind a `cfg` — one spelling that means the same thing everywhere.
+dunce = "1"
 globset = "0.4"
 jwalk = "0.8"
 serde = { version = "1", features = ["derive"] }

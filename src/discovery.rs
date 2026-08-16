@@ -140,7 +140,7 @@ pub fn probe_home(home: &Path) -> Vec<Discovery> {
             // reached through a symlink would otherwise produce discoveries
             // that no ignore rule written against the real path can match, and
             // that cleanup canonicalizes into something else again.
-            let path = std::fs::canonicalize(&path).unwrap_or(path);
+            let path = dunce::canonicalize(&path).unwrap_or(path);
             Some(Discovery {
                 path,
                 label: location.label,
@@ -248,8 +248,8 @@ fn same_path(catalogued: &Path, candidate: &Path) -> bool {
         return true;
     }
     match (
-        std::fs::canonicalize(catalogued),
-        std::fs::canonicalize(candidate),
+        dunce::canonicalize(catalogued),
+        dunce::canonicalize(candidate),
     ) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
