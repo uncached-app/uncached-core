@@ -267,8 +267,18 @@ macro_rules! locations {
     };
 }
 
-use Category::{AiToolCache, EditorCache, PackageManagerCache, XcodeDerivedData};
-use LocationKind::{Artifact, ReportOnly, SharedCache, ToolState};
+use Category::{AiToolCache, EditorCache, PackageManagerCache};
+use LocationKind::{Artifact, SharedCache, ToolState};
+
+// Only the macOS catalogue names these. Imported unconditionally they are dead
+// on Linux and Windows, and a warning that is expected on two of three
+// platforms is a warning nobody reads — which is how the next real one gets
+// past. Everywhere else in this file refers to them fully qualified, so the
+// tests are unaffected.
+#[cfg(target_os = "macos")]
+use Category::XcodeDerivedData;
+#[cfg(target_os = "macos")]
+use LocationKind::ReportOnly;
 
 // `Archives` and `CoreSimulator/Devices` are catalogued as `ReportOnly`. They
 // are usually the two heaviest directories Xcode owns, and neither is ours to

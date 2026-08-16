@@ -261,6 +261,13 @@ mod tests {
     /// symlink — `/var` is `/private/var` on macOS — while a scan reports the
     /// resolved form. Left unresolved, such a rule compiles cleanly, counts
     /// towards "2 rules in force" and protects nothing.
+    ///
+    /// Unix only, and stated as the test not existing elsewhere rather than as
+    /// a `return` partway through it. Returning early left every line after it
+    /// unreachable on Windows — a compile error the moment that platform is
+    /// actually built — and left the fixture directory it had already created
+    /// behind, because the cleanup was among the lines it skipped.
+    #[cfg(unix)]
     #[test]
     fn a_pasted_path_that_travels_through_a_symlink_still_matches() {
         let real = std::env::temp_dir().join("uncached-ignore-real");
@@ -268,10 +275,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&real);
         let _ = std::fs::remove_file(&link);
         std::fs::create_dir_all(real.join("node_modules")).expect("fixture should be created");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).expect("symlink should be created");
-        #[cfg(not(unix))]
-        return;
 
         // The rule is written with the link; a scan reports what traversal
         // canonicalized, so that is what it has to match.
