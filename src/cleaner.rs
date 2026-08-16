@@ -61,14 +61,14 @@ fn validate_clean_policy(
         let is_symlink =
             fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink());
         is_symlink
-            && fs::canonicalize(ancestor)
+            && dunce::canonicalize(ancestor)
                 .is_ok_and(|canonical_ancestor| is_within(&root, &canonical_ancestor))
     }) {
         return Err(CoreError::TargetReparsePoint {
             path: target.path.clone(),
         });
     }
-    let canonical = fs::canonicalize(&target.path)?;
+    let canonical = dunce::canonicalize(&target.path)?;
     let name = canonical
         .file_name()
         .and_then(|name| name.to_str())
@@ -400,7 +400,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        fs::canonicalize(root).unwrap()
+        dunce::canonicalize(root).unwrap()
     }
 
     #[cfg(windows)]
@@ -432,9 +432,9 @@ mod tests {
             let hook_source = {
                 let source = project.join("node_modules-replacement");
                 fs::create_dir(&source).unwrap();
-                fs::canonicalize(source).unwrap()
+                dunce::canonicalize(source).unwrap()
             };
-            let hook_replacement = fs::canonicalize(&replacement).unwrap();
+            let hook_replacement = dunce::canonicalize(&replacement).unwrap();
             let (done_tx, done_rx) = mpsc::channel();
             let (stop_tx, stop_rx) = mpsc::channel();
             let (ready_tx, ready_rx) = mpsc::channel();

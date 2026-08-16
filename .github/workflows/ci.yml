@@ -5,6 +5,11 @@ on:
   push:
     branches:
       - main
+    # Prose does not compile.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
 
 permissions:
   contents: read
@@ -23,10 +28,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS is not here on purpose. It is billed at ten times the minutes
+        # and was seventy-five per cent of everything this account has spent —
+        # two hundred real minutes becoming two thousand — to check the one
+        # platform that is compiled and tested on the machine this is written
+        # on, every time anybody works on it.
+        #
+        # Linux and Windows stay because neither is covered anywhere else, and
+        # between them they cost a fifth of what macOS alone did. Windows
+        # especially: this crate has tests that only exist there, and they are
+        # what caught the last real bug in it.
         os:
           - ubuntu-latest
           - windows-latest
-          - macos-latest
 
     steps:
       - uses: actions/checkout@v4

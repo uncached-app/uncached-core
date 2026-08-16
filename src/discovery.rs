@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(
             found[0].path,
-            expected.canonicalize().expect("fixture should resolve"),
+            dunce::canonicalize(&expected).expect("fixture should resolve"),
             "discoveries are reported resolved, like traversal reports its own"
         );
         assert_eq!(found[0].label, location.label);

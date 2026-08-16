@@ -279,8 +279,7 @@ mod tests {
 
         // The rule is written with the link; a scan reports what traversal
         // canonicalized, so that is what it has to match.
-        let scanned = real
-            .canonicalize()
+        let scanned = dunce::canonicalize(&real)
             .expect("fixture should resolve")
             .join("node_modules");
         let (rules, errors) = IgnoreRules::compile(&link.to_string_lossy(), None);
