@@ -113,10 +113,42 @@ pub fn directory_size_report_with_cancel(
     root: &Path,
     cancelled: &AtomicBool,
 ) -> CoreResult<Option<DirectorySizeReport>> {
+    directory_size_report_skipping(root, &[], cancelled)
+}
+
+/// The same, without descending into the subtrees named.
+///
+/// Measuring a project used to walk it whole and then walk each artifact
+/// directory again for its own figure, so `node_modules` and `target` were
+/// visited twice — and in a typical project those are ninety-eight per cent of
+/// the files. Sizing the artifacts once and the rest without them gives both
+/// numbers for one pass over each file.
+///
+/// The doubling costs almost nothing on a warm macOS cache and is what makes
+/// this take minutes on Windows, where a real-time scanner inspects every file
+/// as it is opened. The waste was on every platform; only one of them notices.
+///
+/// `skip` holds directories, compared by exact path against what the walk is
+/// about to descend into. Callers pass paths from the same traversal, so they
+/// already agree on spelling.
+pub fn directory_size_report_skipping(
+    root: &Path,
+    skip: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> CoreResult<Option<DirectorySizeReport>> {
+    let skip: std::collections::HashSet<PathBuf> = skip.iter().cloned().collect();
     WalkDir::new(root)
         .skip_hidden(false)
         .follow_links(false)
         .parallelism(size_parallelism())
+        .process_read_dir(move |_, _, _, children| {
+            // Pruned here rather than filtered afterwards: the point is not to
+            // read what is inside them.
+            children.retain(|child| match child {
+                Ok(entry) => !skip.contains(&entry.path()),
+                Err(_) => true,
+            });
+        })
         .into_iter()
         .try_fold(DirectorySizeReport::default(), |mut report, entry| {
             if cancelled.load(Ordering::Acquire) {
@@ -149,6 +181,79 @@ pub fn directory_size_report_with_cancel(
                 Err(CoreError::Io(error))
             }
         })
+}
+
+#[cfg(test)]
+mod skipping_tests {
+    use super::{directory_size_report, directory_size_report_skipping};
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+
+    /// The property the optimisation rests on: measuring the artifacts once and
+    /// the rest without them adds up to measuring everything. If it ever does
+    /// not, a project's total silently loses whatever fell through the gap —
+    /// which is worse than the slowness this replaced.
+    #[test]
+    fn what_is_skipped_plus_what_is_skipping_it_is_the_whole() {
+        let root = std::env::temp_dir().join(format!("uncached-skip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let artifact = root.join("node_modules");
+        fs::create_dir_all(artifact.join("deep").join("deeper")).expect("fixture");
+        fs::create_dir_all(root.join("src")).expect("fixture");
+        fs::write(root.join("src").join("main.rs"), vec![b'a'; 500]).expect("fixture");
+        fs::write(root.join("README.md"), vec![b'b'; 300]).expect("fixture");
+        fs::write(artifact.join("package.json"), vec![b'c'; 700]).expect("fixture");
+        fs::write(
+            artifact.join("deep").join("deeper").join("blob"),
+            vec![b'd'; 1100],
+        )
+        .expect("fixture");
+
+        let whole = directory_size_report(&root).expect("whole");
+        let without = directory_size_report_skipping(
+            &root,
+            std::slice::from_ref(&artifact),
+            &AtomicBool::new(false),
+        )
+        .expect("without")
+        .expect("not cancelled");
+        let only = directory_size_report(&artifact).expect("only");
+
+        assert_eq!(
+            without.bytes, 800,
+            "the source files, and nothing under the artifact"
+        );
+        assert_eq!(only.bytes, 1800);
+        assert_eq!(
+            without.bytes + only.bytes,
+            whole.bytes,
+            "one pass over each file has to reach the same total as two"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Skipping a path that is not there changes nothing, which is what lets a
+    /// caller pass targets that vanished between the walk and the sizing.
+    #[test]
+    fn a_skip_that_matches_nothing_is_not_a_smaller_total() {
+        let root = std::env::temp_dir().join(format!("uncached-skip-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("fixture");
+        fs::write(root.join("file"), vec![b'x'; 42]).expect("fixture");
+
+        let whole = directory_size_report(&root).expect("whole");
+        let skipped = directory_size_report_skipping(
+            &root,
+            &[root.join("does-not-exist")],
+            &AtomicBool::new(false),
+        )
+        .expect("skipped")
+        .expect("not cancelled");
+
+        assert_eq!(skipped.bytes, whole.bytes);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 pub fn file_identity(path: &Path) -> Option<FileIdentity> {
