@@ -140,7 +140,7 @@ pub fn probe_home(home: &Path) -> Vec<Discovery> {
             // reached through a symlink would otherwise produce discoveries
             // that no ignore rule written against the real path can match, and
             // that cleanup canonicalizes into something else again.
-            let path = dunce::canonicalize(&path).unwrap_or(path);
+            let path = crate::filesystem::canonical(&path).unwrap_or(path);
             Some(Discovery {
                 path,
                 label: location.label,
@@ -248,8 +248,8 @@ fn same_path(catalogued: &Path, candidate: &Path) -> bool {
         return true;
     }
     match (
-        dunce::canonicalize(catalogued),
-        dunce::canonicalize(candidate),
+        crate::filesystem::canonical(catalogued),
+        crate::filesystem::canonical(candidate),
     ) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(
             found[0].path,
-            dunce::canonicalize(&expected).expect("fixture should resolve"),
+            crate::filesystem::canonical(&expected).expect("fixture should resolve"),
             "discoveries are reported resolved, like traversal reports its own"
         );
         assert_eq!(found[0].label, location.label);

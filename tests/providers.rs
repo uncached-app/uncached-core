@@ -192,7 +192,7 @@ fn ecosystem_providers_match_only_beside_their_project_file() {
         ("xcode-workspace/build", Category::XcodeDerivedData),
     ]
     .into_iter()
-    .map(|(path, category)| (fs::canonicalize(root.join(path)).unwrap(), category))
+    .map(|(path, category)| (uncached_core::canonical(root.join(path)).unwrap(), category))
     .collect::<Vec<_>>();
 
     assert_eq!(found, expected);
@@ -239,7 +239,7 @@ fn contextual_providers_reject_same_basename_decoy_contexts() {
         ("turbo-valid/.turbo", Category::Turbo),
     ]
     .into_iter()
-    .map(|(path, category)| (fs::canonicalize(root.join(path)).unwrap(), category))
+    .map(|(path, category)| (uncached_core::canonical(root.join(path)).unwrap(), category))
     .collect::<Vec<_>>();
 
     assert_eq!(found, expected);
@@ -321,7 +321,7 @@ fn an_ignored_path_is_never_walked_into() {
     fs::create_dir_all(root.join("skip/node_modules")).unwrap();
     fs::write(root.join("skip/package.json"), b"{}").unwrap();
 
-    let canonical = fs::canonicalize(&root).unwrap();
+    let canonical = uncached_core::canonical(&root).unwrap();
     let (rules, errors) =
         IgnoreRules::compile(&format!("{}/skip", canonical.to_string_lossy()), None);
     assert!(errors.is_empty(), "{errors:?}");
@@ -354,8 +354,8 @@ fn cleanup_refuses_a_target_a_rule_excludes() {
     fs::create_dir_all(&target_path).unwrap();
     fs::write(root.join("project/package.json"), b"{}").unwrap();
 
-    let canonical_root = fs::canonicalize(&root).unwrap();
-    let canonical_target = fs::canonicalize(&target_path).unwrap();
+    let canonical_root = uncached_core::canonical(&root).unwrap();
+    let canonical_target = uncached_core::canonical(&target_path).unwrap();
     let target = uncached_core::ScanTarget::new(canonical_target.clone(), Category::NodeModules, 0)
         .with_identity(uncached_core::filesystem::file_identity(&canonical_target));
 

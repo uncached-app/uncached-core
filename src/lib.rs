@@ -21,6 +21,7 @@ pub use discovery::{
     LocationKind,
 };
 pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
+pub use filesystem::canonical;
 pub use ignore_rules::{IgnoreRuleError, IgnoreRules};
 pub use model::{Category, CleanReport, FileIdentity, ScanTarget, TraversalOutcome};
 pub use scanner::{
