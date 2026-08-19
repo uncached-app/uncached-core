@@ -10,7 +10,9 @@
 //! ```
 
 use uncached_core::confidence::assess;
-use uncached_core::discovery::{home_directory, known_locations, probe_home, signals_for};
+use uncached_core::discovery::{
+    home_directory, known_locations, probe_home, probe_temp, signals_for,
+};
 use uncached_core::filesystem::directory_size_report;
 
 fn main() {
@@ -19,7 +21,9 @@ fn main() {
         std::process::exit(1);
     };
 
-    let found = probe_home(&home);
+    let mut found = probe_home(&home);
+    // Scratch outside the home directory, which no catalogue entry can reach.
+    found.extend(probe_temp(&home));
     println!(
         "{home}: {} of {} catalogued locations present\n",
         found.len(),

@@ -85,6 +85,20 @@ pub struct KnownLocation {
     pub relative: &'static str,
     pub category: Category,
     pub kind: LocationKind,
+    /// The executables that own this directory, by the name a process list
+    /// reports them under.
+    ///
+    /// A cache is only disposable while nothing is using it. `.claude/ide`
+    /// holds the lock files of *live* sessions; a package manager's store is
+    /// being written to during an install. Removing either mid-flight does not
+    /// free space, it breaks the thing that was running — and the tool cannot
+    /// tell that from a corrupt cache afterwards.
+    ///
+    /// Empty means nothing here is worth checking for: a directory no running
+    /// program holds open, or one whose owner cannot be named unambiguously.
+    /// It is never a claim that removal is safe, only that this particular
+    /// question has no answer to give.
+    pub owner: &'static [&'static str],
 }
 
 impl KnownLocation {
@@ -95,6 +109,129 @@ impl KnownLocation {
     }
 }
 
+/// Scratch a tool keeps outside the home directory.
+///
+/// The catalogue above is written relative to the home directory, because that
+/// is where a developer's caches live. Not all of them: a coding agent writes
+/// its per-session working files under the system temp directory, where the
+/// name carries the user id rather than being a fixed string — and on this
+/// machine that tree was seven gigabytes, larger than every catalogued cache
+/// put together and invisible to every screen this product has.
+///
+/// Probed rather than walked, on the same principle as the table. `/tmp` holds
+/// live sockets and lock files belonging to every running program on the
+/// machine, and reading it for anything we cannot name would be the walk this
+/// module exists to avoid. Only directories this names, owned by the user
+/// running us, are ever reported.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct TempLocation {
+    label: &'static str,
+    /// Matched against the directory name up to the user id.
+    prefix: &'static str,
+    category: Category,
+    kind: LocationKind,
+    owner: &'static [&'static str],
+}
+
+/// The temp roots worth probing, in the order they are tried.
+///
+/// `/private/tmp` is where `/tmp` actually resolves on macOS, and the agent
+/// writes the resolved form. Both are listed so a machine that reports either
+/// is covered, and the canonicalisation in [`probe_temp`] keeps one answer.
+#[cfg(unix)]
+const TEMP_ROOTS: &[&str] = &["/tmp", "/private/tmp"];
+
+#[cfg(unix)]
+static TEMP_LOCATIONS: &[TempLocation] = &[TempLocation {
+    label: "Claude Code session scratch",
+    prefix: "claude-",
+    category: Category::AiToolCache,
+    kind: LocationKind::ToolState,
+    owner: &["claude"],
+}];
+
+/// The scratch directories that exist on this machine, for the user running us.
+///
+/// `home` is what decides who that is: it is owned by the account this process
+/// belongs to, so its owner id is ours without asking the platform for it. A
+/// directory in `/tmp` belonging to somebody else is another account's session
+/// and never ours to report, let alone remove.
+#[cfg(unix)]
+pub fn probe_temp(home: &Path) -> Vec<Discovery> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(us) = std::fs::metadata(home).map(|metadata| metadata.uid()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Discovery> = Vec::new();
+
+    for root in TEMP_ROOTS {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Some(location) = TEMP_LOCATIONS
+                .iter()
+                .find(|location| name.starts_with(location.prefix))
+            else {
+                continue;
+            };
+            if !is_session_scratch(&name, location.prefix) {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.uid() != us {
+                continue;
+            }
+            let path = crate::filesystem::canonical(entry.path()).unwrap_or_else(|_| entry.path());
+            // `/tmp` and `/private/tmp` are the same tree on macOS, so the two
+            // roots would otherwise report one directory twice.
+            if found.iter().any(|discovery| discovery.path == path) {
+                continue;
+            }
+            // Canonical, and the same tree the path was resolved into:
+            // `/tmp` is a symlink to `/private/tmp` on macOS, and a root that
+            // still said `/tmp` would not contain the path that says
+            // `/private/tmp`.
+            let root = crate::filesystem::canonical(Path::new(root))
+                .unwrap_or_else(|_| PathBuf::from(root));
+            found.push(Discovery {
+                path,
+                label: location.label,
+                category: location.category.clone(),
+                kind: location.kind,
+                owner: location.owner,
+                root,
+            });
+        }
+    }
+    found
+}
+
+/// Whether a directory name is `<prefix><user id>` and nothing else.
+///
+/// The prefix alone would claim `claude-config`, which is somebody's settings
+/// rather than a session's scratch.
+#[cfg(unix)]
+fn is_session_scratch(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+#[cfg(not(unix))]
+pub fn probe_temp(_home: &Path) -> Vec<Discovery> {
+    // The agent's temp layout on Windows has not been confirmed, and a guess
+    // here is a guess about a directory this product would offer to delete.
+    Vec::new()
+}
+
 /// A location from the table that exists on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Discovery {
@@ -102,6 +239,18 @@ pub struct Discovery {
     pub label: &'static str,
     pub category: Category,
     pub kind: LocationKind,
+    /// See [`KnownLocation::owner`].
+    pub owner: &'static [&'static str],
+    /// The directory this was found under.
+    ///
+    /// Cleanup refuses anything outside the root its target was registered
+    /// against — the rule that keeps a workspace scan from reaching past the
+    /// folders the user chose. Catalogued locations used to be registered
+    /// against the home directory because that is where all of them were.
+    /// Session scratch is not: it lives under `/tmp`, so a target that named
+    /// home as its root was one cleanup would refuse to remove, having offered
+    /// it. The base travels with the discovery instead of being assumed.
+    pub root: PathBuf,
 }
 
 /// The user's home directory, from the environment.
@@ -125,6 +274,10 @@ pub fn home_directory() -> Option<PathBuf> {
 /// is the caller's decision, because the caller is the one that knows whether
 /// it can afford to walk a 40 GB `DerivedData` right now.
 pub fn probe_home(home: &Path) -> Vec<Discovery> {
+    // Resolved once, for the same reason each path below is: a home reached
+    // through a symlink would not contain the canonical paths found under it,
+    // and containment is what cleanup checks before it removes anything.
+    let root = crate::filesystem::canonical(home).unwrap_or_else(|_| home.to_path_buf());
     known_locations()
         .iter()
         .filter_map(|location| {
@@ -146,6 +299,8 @@ pub fn probe_home(home: &Path) -> Vec<Discovery> {
                 label: location.label,
                 category: location.category.clone(),
                 kind: location.kind,
+                owner: location.owner,
+                root: root.clone(),
             })
         })
         .collect()
@@ -182,6 +337,15 @@ pub fn known_locations() -> &'static [KnownLocation] {
 pub struct KnownLocationScanner {
     home: PathBuf,
     category: Category,
+    /// Scratch outside the home directory, resolved once when the set is built.
+    ///
+    /// The catalogue is a list of paths named in advance, and that is what
+    /// makes vouching stricter than a name match. A temp directory carries the
+    /// user id in its name, so it cannot be written down in advance — but it is
+    /// still *named in advance* in every sense that matters: the prefix, the
+    /// owner and the root are ours, and [`probe_temp`] is the only thing that
+    /// can put a path in here.
+    temp: Vec<PathBuf>,
 }
 
 impl KnownLocationScanner {
@@ -191,15 +355,24 @@ impl KnownLocationScanner {
     /// exactly one provider.
     pub fn provider_set(home: PathBuf) -> ProviderSet {
         let mut providers = ProviderSet::new();
+        let scratch = probe_temp(&home);
         for category in [
             Category::XcodeDerivedData,
             Category::PackageManagerCache,
             Category::AiToolCache,
             Category::EditorCache,
         ] {
+            let temp = scratch
+                .iter()
+                .filter(|discovery| {
+                    discovery.category == category && discovery.kind != LocationKind::ReportOnly
+                })
+                .map(|discovery| discovery.path.clone())
+                .collect();
             providers.add_scanner(Self {
                 home: home.clone(),
                 category,
+                temp,
             });
         }
         providers
@@ -227,11 +400,16 @@ impl Scanner for KnownLocationScanner {
     fn matches(&self, name: &str) -> bool {
         self.entries()
             .any(|location| last_segment(location.relative) == name)
+            || self
+                .temp
+                .iter()
+                .any(|path| path.file_name().is_some_and(|segment| segment == name))
     }
 
     fn confirm_context(&self, path: &Path) -> bool {
         self.entries()
             .any(|location| same_path(&location.resolve(&self.home), path))
+            || self.temp.iter().any(|scratch| same_path(scratch, path))
     }
 }
 
@@ -257,12 +435,13 @@ fn same_path(catalogued: &Path, candidate: &Path) -> bool {
 }
 
 macro_rules! locations {
-    ($($label:literal => $relative:literal, $category:expr, $kind:expr;)*) => {
+    ($($label:literal => $relative:literal, $category:expr, $kind:expr, $owner:expr;)*) => {
         &[$(KnownLocation {
             label: $label,
             relative: $relative,
             category: $category,
             kind: $kind,
+            owner: $owner,
         }),*]
     };
 }
@@ -288,114 +467,114 @@ use LocationKind::ReportOnly;
 // `CoreSimulator/Caches` next to them is an ordinary artifact.
 #[cfg(target_os = "macos")]
 static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
-    "Xcode DerivedData" => "Library/Developer/Xcode/DerivedData", XcodeDerivedData, Artifact;
-    "Simulator devices" => "Library/Developer/CoreSimulator/Devices", XcodeDerivedData, ReportOnly;
-    "Xcode archives" => "Library/Developer/Xcode/Archives", XcodeDerivedData, ReportOnly;
-    "Xcode iOS device support" => "Library/Developer/Xcode/iOS DeviceSupport", XcodeDerivedData, Artifact;
-    "Xcode watchOS device support" => "Library/Developer/Xcode/watchOS DeviceSupport", XcodeDerivedData, Artifact;
-    "Xcode tvOS device support" => "Library/Developer/Xcode/tvOS DeviceSupport", XcodeDerivedData, Artifact;
-    "Simulator caches" => "Library/Developer/CoreSimulator/Caches", XcodeDerivedData, Artifact;
-    "Xcode cache" => "Library/Caches/com.apple.dt.Xcode", XcodeDerivedData, Artifact;
+    "Xcode DerivedData" => "Library/Developer/Xcode/DerivedData", XcodeDerivedData, Artifact, &["Xcode"];
+    "Simulator devices" => "Library/Developer/CoreSimulator/Devices", XcodeDerivedData, ReportOnly, &["Xcode", "Simulator"];
+    "Xcode archives" => "Library/Developer/Xcode/Archives", XcodeDerivedData, ReportOnly, &["Xcode"];
+    "Xcode iOS device support" => "Library/Developer/Xcode/iOS DeviceSupport", XcodeDerivedData, Artifact, &["Xcode"];
+    "Xcode watchOS device support" => "Library/Developer/Xcode/watchOS DeviceSupport", XcodeDerivedData, Artifact, &["Xcode"];
+    "Xcode tvOS device support" => "Library/Developer/Xcode/tvOS DeviceSupport", XcodeDerivedData, Artifact, &["Xcode"];
+    "Simulator caches" => "Library/Developer/CoreSimulator/Caches", XcodeDerivedData, Artifact, &["Xcode", "Simulator"];
+    "Xcode cache" => "Library/Caches/com.apple.dt.Xcode", XcodeDerivedData, Artifact, &["Xcode"];
 
-    "npm cache" => ".npm/_cacache", PackageManagerCache, SharedCache;
-    "pnpm store" => "Library/pnpm/store", PackageManagerCache, SharedCache;
-    "pnpm cache" => "Library/Caches/pnpm", PackageManagerCache, SharedCache;
-    "Yarn cache" => "Library/Caches/Yarn", PackageManagerCache, SharedCache;
-    "Yarn Berry cache" => ".yarn/berry/cache", PackageManagerCache, SharedCache;
-    "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache;
-    "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache;
-    "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache;
-    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState;
-    "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache;
-    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState;
-    "Go build cache" => "Library/Caches/go-build", PackageManagerCache, SharedCache;
-    "pip cache" => "Library/Caches/pip", PackageManagerCache, SharedCache;
-    "CocoaPods cache" => "Library/Caches/CocoaPods", PackageManagerCache, SharedCache;
-    "Homebrew downloads" => "Library/Caches/Homebrew", PackageManagerCache, SharedCache;
-    "node-gyp headers" => "Library/Caches/node-gyp", PackageManagerCache, SharedCache;
-    "TypeScript cache" => "Library/Caches/typescript", PackageManagerCache, SharedCache;
-    "Deno cache" => "Library/Caches/deno", PackageManagerCache, SharedCache;
-    "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache;
-    "Playwright browsers" => "Library/Caches/ms-playwright", PackageManagerCache, SharedCache;
+    "npm cache" => ".npm/_cacache", PackageManagerCache, SharedCache, &[];
+    "pnpm store" => "Library/pnpm/store", PackageManagerCache, SharedCache, &[];
+    "pnpm cache" => "Library/Caches/pnpm", PackageManagerCache, SharedCache, &[];
+    "Yarn cache" => "Library/Caches/Yarn", PackageManagerCache, SharedCache, &[];
+    "Yarn Berry cache" => ".yarn/berry/cache", PackageManagerCache, SharedCache, &[];
+    "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache, &["bun"];
+    "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache, &["cargo"];
+    "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache, &[];
+    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState, &[];
+    "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache, &[];
+    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState, &["go"];
+    "Go build cache" => "Library/Caches/go-build", PackageManagerCache, SharedCache, &["go"];
+    "pip cache" => "Library/Caches/pip", PackageManagerCache, SharedCache, &[];
+    "CocoaPods cache" => "Library/Caches/CocoaPods", PackageManagerCache, SharedCache, &[];
+    "Homebrew downloads" => "Library/Caches/Homebrew", PackageManagerCache, SharedCache, &[];
+    "node-gyp headers" => "Library/Caches/node-gyp", PackageManagerCache, SharedCache, &[];
+    "TypeScript cache" => "Library/Caches/typescript", PackageManagerCache, SharedCache, &[];
+    "Deno cache" => "Library/Caches/deno", PackageManagerCache, SharedCache, &["deno"];
+    "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
+    "Playwright browsers" => "Library/Caches/ms-playwright", PackageManagerCache, SharedCache, &[];
 
-    "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState;
-    "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState;
-    "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState;
-    "Codex logs" => ".codex/log", AiToolCache, ToolState;
-    "opencode cache" => ".cache/opencode", AiToolCache, ToolState;
-    "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState;
-    "opencode tool output" => ".local/share/opencode/tool-output", AiToolCache, ToolState;
+    "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
+    "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
+    "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState, &["claude"];
+    "Codex logs" => ".codex/log", AiToolCache, ToolState, &["codex"];
+    "opencode cache" => ".cache/opencode", AiToolCache, ToolState, &["opencode"];
+    "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState, &["opencode"];
+    "opencode tool output" => ".local/share/opencode/tool-output", AiToolCache, ToolState, &["opencode"];
 
-    "JetBrains caches" => "Library/Caches/JetBrains", EditorCache, ToolState;
-    "VS Code cache" => "Library/Application Support/Code/Cache", EditorCache, Artifact;
-    "VS Code cached data" => "Library/Application Support/Code/CachedData", EditorCache, Artifact;
-    "VS Code GPU cache" => "Library/Application Support/Code/GPUCache", EditorCache, Artifact;
-    "VS Code extension packages" => "Library/Application Support/Code/CachedExtensionVSIXs", EditorCache, Artifact;
+    "JetBrains caches" => "Library/Caches/JetBrains", EditorCache, ToolState, &["idea", "pycharm", "webstorm", "goland", "clion", "phpstorm", "rubymine", "rustrover", "datagrip"];
+    "VS Code cache" => "Library/Application Support/Code/Cache", EditorCache, Artifact, &["Code"];
+    "VS Code cached data" => "Library/Application Support/Code/CachedData", EditorCache, Artifact, &["Code"];
+    "VS Code GPU cache" => "Library/Application Support/Code/GPUCache", EditorCache, Artifact, &["Code"];
+    "VS Code extension packages" => "Library/Application Support/Code/CachedExtensionVSIXs", EditorCache, Artifact, &["Code"];
 };
 
 #[cfg(target_os = "linux")]
 static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
-    "npm cache" => ".npm/_cacache", PackageManagerCache, SharedCache;
-    "pnpm store" => ".local/share/pnpm/store", PackageManagerCache, SharedCache;
-    "pnpm cache" => ".cache/pnpm", PackageManagerCache, SharedCache;
-    "Yarn cache" => ".cache/yarn", PackageManagerCache, SharedCache;
-    "Yarn Berry cache" => ".yarn/berry/cache", PackageManagerCache, SharedCache;
-    "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache;
-    "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache;
-    "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache;
-    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState;
-    "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache;
-    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState;
-    "Go build cache" => ".cache/go-build", PackageManagerCache, SharedCache;
-    "pip cache" => ".cache/pip", PackageManagerCache, SharedCache;
-    "node-gyp headers" => ".cache/node-gyp", PackageManagerCache, SharedCache;
-    "Deno cache" => ".cache/deno", PackageManagerCache, SharedCache;
-    "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache;
-    "Playwright browsers" => ".cache/ms-playwright", PackageManagerCache, SharedCache;
+    "npm cache" => ".npm/_cacache", PackageManagerCache, SharedCache, &[];
+    "pnpm store" => ".local/share/pnpm/store", PackageManagerCache, SharedCache, &[];
+    "pnpm cache" => ".cache/pnpm", PackageManagerCache, SharedCache, &[];
+    "Yarn cache" => ".cache/yarn", PackageManagerCache, SharedCache, &[];
+    "Yarn Berry cache" => ".yarn/berry/cache", PackageManagerCache, SharedCache, &[];
+    "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache, &["bun"];
+    "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache, &["cargo"];
+    "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache, &[];
+    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState, &[];
+    "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache, &[];
+    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState, &["go"];
+    "Go build cache" => ".cache/go-build", PackageManagerCache, SharedCache, &["go"];
+    "pip cache" => ".cache/pip", PackageManagerCache, SharedCache, &[];
+    "node-gyp headers" => ".cache/node-gyp", PackageManagerCache, SharedCache, &[];
+    "Deno cache" => ".cache/deno", PackageManagerCache, SharedCache, &["deno"];
+    "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
+    "Playwright browsers" => ".cache/ms-playwright", PackageManagerCache, SharedCache, &[];
 
-    "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState;
-    "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState;
-    "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState;
-    "Codex logs" => ".codex/log", AiToolCache, ToolState;
-    "opencode cache" => ".cache/opencode", AiToolCache, ToolState;
-    "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState;
-    "opencode tool output" => ".local/share/opencode/tool-output", AiToolCache, ToolState;
+    "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
+    "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
+    "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState, &["claude"];
+    "Codex logs" => ".codex/log", AiToolCache, ToolState, &["codex"];
+    "opencode cache" => ".cache/opencode", AiToolCache, ToolState, &["opencode"];
+    "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState, &["opencode"];
+    "opencode tool output" => ".local/share/opencode/tool-output", AiToolCache, ToolState, &["opencode"];
 
-    "JetBrains caches" => ".cache/JetBrains", EditorCache, ToolState;
-    "VS Code cache" => ".config/Code/Cache", EditorCache, Artifact;
-    "VS Code cached data" => ".config/Code/CachedData", EditorCache, Artifact;
-    "VS Code GPU cache" => ".config/Code/GPUCache", EditorCache, Artifact;
+    "JetBrains caches" => ".cache/JetBrains", EditorCache, ToolState, &["idea", "pycharm", "webstorm", "goland", "clion", "phpstorm", "rubymine", "rustrover", "datagrip"];
+    "VS Code cache" => ".config/Code/Cache", EditorCache, Artifact, &["Code"];
+    "VS Code cached data" => ".config/Code/CachedData", EditorCache, Artifact, &["Code"];
+    "VS Code GPU cache" => ".config/Code/GPUCache", EditorCache, Artifact, &["Code"];
 };
 
 #[cfg(windows)]
 static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
-    "npm cache" => "AppData/Local/npm-cache/_cacache", PackageManagerCache, SharedCache;
-    "pnpm store" => "AppData/Local/pnpm/store", PackageManagerCache, SharedCache;
-    "Yarn cache" => "AppData/Local/Yarn/Cache", PackageManagerCache, SharedCache;
-    "Yarn Berry cache" => ".yarn/berry/cache", PackageManagerCache, SharedCache;
-    "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache;
-    "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache;
-    "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache;
-    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState;
-    "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache;
-    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState;
-    "Go build cache" => "AppData/Local/go-build", PackageManagerCache, SharedCache;
-    "pip cache" => "AppData/Local/pip/Cache", PackageManagerCache, SharedCache;
-    "node-gyp headers" => "AppData/Local/node-gyp/Cache", PackageManagerCache, SharedCache;
-    "Deno cache" => "AppData/Local/deno", PackageManagerCache, SharedCache;
-    "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache;
-    "Playwright browsers" => "AppData/Local/ms-playwright", PackageManagerCache, SharedCache;
+    "npm cache" => "AppData/Local/npm-cache/_cacache", PackageManagerCache, SharedCache, &[];
+    "pnpm store" => "AppData/Local/pnpm/store", PackageManagerCache, SharedCache, &[];
+    "Yarn cache" => "AppData/Local/Yarn/Cache", PackageManagerCache, SharedCache, &[];
+    "Yarn Berry cache" => ".yarn/berry/cache", PackageManagerCache, SharedCache, &[];
+    "Bun cache" => ".bun/install/cache", PackageManagerCache, SharedCache, &["bun"];
+    "Cargo registry" => ".cargo/registry", PackageManagerCache, SharedCache, &["cargo"];
+    "Gradle cache" => ".gradle/caches", PackageManagerCache, SharedCache, &[];
+    "Maven repository" => ".m2/repository", PackageManagerCache, ToolState, &[];
+    "NuGet packages" => ".nuget/packages", PackageManagerCache, SharedCache, &[];
+    "Go module cache" => "go/pkg/mod", PackageManagerCache, ToolState, &["go"];
+    "Go build cache" => "AppData/Local/go-build", PackageManagerCache, SharedCache, &["go"];
+    "pip cache" => "AppData/Local/pip/Cache", PackageManagerCache, SharedCache, &[];
+    "node-gyp headers" => "AppData/Local/node-gyp/Cache", PackageManagerCache, SharedCache, &[];
+    "Deno cache" => "AppData/Local/deno", PackageManagerCache, SharedCache, &["deno"];
+    "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
+    "Playwright browsers" => "AppData/Local/ms-playwright", PackageManagerCache, SharedCache, &[];
 
-    "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState;
-    "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState;
-    "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState;
-    "Codex logs" => ".codex/log", AiToolCache, ToolState;
-    "opencode cache" => ".cache/opencode", AiToolCache, ToolState;
+    "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
+    "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
+    "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState, &["claude"];
+    "Codex logs" => ".codex/log", AiToolCache, ToolState, &["codex"];
+    "opencode cache" => ".cache/opencode", AiToolCache, ToolState, &["opencode"];
 
-    "JetBrains caches" => "AppData/Local/JetBrains", EditorCache, ToolState;
-    "VS Code cache" => "AppData/Roaming/Code/Cache", EditorCache, Artifact;
-    "VS Code cached data" => "AppData/Roaming/Code/CachedData", EditorCache, Artifact;
-    "VS Code GPU cache" => "AppData/Roaming/Code/GPUCache", EditorCache, Artifact;
+    "JetBrains caches" => "AppData/Local/JetBrains", EditorCache, ToolState, &["idea", "pycharm", "webstorm", "goland", "clion", "phpstorm", "rubymine", "rustrover", "datagrip"];
+    "VS Code cache" => "AppData/Roaming/Code/Cache", EditorCache, Artifact, &["Code"];
+    "VS Code cached data" => "AppData/Roaming/Code/CachedData", EditorCache, Artifact, &["Code"];
+    "VS Code GPU cache" => "AppData/Roaming/Code/GPUCache", EditorCache, Artifact, &["Code"];
 };
 
 #[cfg(test)]
@@ -480,6 +659,88 @@ mod tests {
         assert!(probe_home(home.path()).is_empty());
     }
 
+    /// The prefix alone is not enough: `claude-config` is somebody's settings.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_user_id_suffix_is_a_session_scratch_directory() {
+        let root = std::env::temp_dir().join(format!("uncached-temp-probe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        // `probe_temp` reads the real temp roots, so this exercises the naming
+        // rule directly rather than through the filesystem.
+        for (name, expected) in [
+            ("claude-501", true),
+            ("claude-0", true),
+            ("claude-", false),
+            ("claude-config", false),
+            ("claude-501x", false),
+            ("claudex-501", false),
+        ] {
+            assert_eq!(
+                super::is_session_scratch(name, "claude-"),
+                expected,
+                "{name}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A scratch directory is nothing unless cleanup will act on it, and
+    /// cleanup only acts on paths a provider vouches for.
+    #[test]
+    fn a_probed_scratch_directory_is_vouched_for() {
+        let Some(home) = super::home_directory() else {
+            return;
+        };
+        let scratch = super::probe_temp(&home);
+        if scratch.is_empty() {
+            return;
+        }
+        let providers = KnownLocationScanner::provider_set(home);
+        for discovery in scratch {
+            let name = discovery
+                .path
+                .file_name()
+                .and_then(|segment| segment.to_str())
+                .expect("a probed directory has a name");
+            assert!(
+                providers.classify(name, &discovery.path).is_some(),
+                "{} was probed and then refused by every provider",
+                discovery.path.display()
+            );
+        }
+    }
+
+    /// The bug this field exists for.
+    ///
+    /// Cleanup refuses a target that is not inside the root it was registered
+    /// against. Every catalogued location used to be registered against the
+    /// home directory, which was true until session scratch — that lives under
+    /// `/tmp`, so it was offered on screen and then refused on removal, with
+    /// nothing on either side explaining why.
+    #[cfg(unix)]
+    #[test]
+    fn every_discovery_is_inside_the_root_it_reports() {
+        // Imported here rather than at the top of the module: both are only
+        // used by this test, which does not exist off unix.
+        use super::{home_directory, probe_temp};
+
+        let Some(home) = home_directory() else {
+            return;
+        };
+        let mut found = probe_home(&home);
+        found.extend(probe_temp(&home));
+        for discovery in &found {
+            assert!(
+                discovery.path.starts_with(&discovery.root),
+                "{} reports a root that does not contain it: {}",
+                discovery.path.display(),
+                discovery.root.display()
+            );
+        }
+    }
+
     #[test]
     fn a_shared_cache_never_reaches_high() {
         let discovery = Discovery {
@@ -487,6 +748,8 @@ mod tests {
             label: "npm cache",
             category: Category::PackageManagerCache,
             kind: LocationKind::SharedCache,
+            owner: &[],
+            root: PathBuf::from("/home/user"),
         };
 
         assert_eq!(
@@ -502,6 +765,8 @@ mod tests {
             label: "Claude Code shell snapshots",
             category: Category::AiToolCache,
             kind: LocationKind::ToolState,
+            owner: &["claude"],
+            root: PathBuf::from("/home/user"),
         };
 
         assert_eq!(
@@ -517,6 +782,8 @@ mod tests {
             label: "Xcode DerivedData",
             category: Category::XcodeDerivedData,
             kind: LocationKind::Artifact,
+            owner: &["Xcode"],
+            root: PathBuf::from("/home/user"),
         };
 
         assert_eq!(assess(signals_for(&discovery)).level, ConfidenceLevel::High);
