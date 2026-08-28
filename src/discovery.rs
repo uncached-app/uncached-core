@@ -268,11 +268,37 @@ pub fn home_directory() -> Option<PathBuf> {
     (path.is_absolute() && path.is_dir()).then_some(path)
 }
 
+/// Whether a catalogued entry stands in for a directory somewhere else.
+///
+/// On Windows a relocated cache is usually a junction — `mklink /J` needs no
+/// administrator, `mklink /D` does — and a junction carries
+/// `IO_REPARSE_TAG_MOUNT_POINT` rather than `IO_REPARSE_TAG_SYMLINK`. Reading
+/// the attribute covers every reparse tag without depending on which of them
+/// the standard library chooses to call a symlink.
+fn is_redirect(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    metadata.file_type().is_symlink()
+}
+
 /// Returns every table entry that exists, as a directory, under `home`.
 ///
 /// Sizes are not measured here. Discovery answers what is there; measuring it
 /// is the caller's decision, because the caller is the one that knows whether
 /// it can afford to walk a 40 GB `DerivedData` right now.
+///
+/// A moved cache is reached through the link left behind. Relocating a store
+/// onto a second volume is ordinary on a machine whose boot disk is the small
+/// one, and the entries that get moved are the largest ones the catalogue
+/// names — so skipping them hid exactly the directories worth finding, and hid
+/// them silently. The redirection is resolved and the discovery carries the
+/// base it actually landed in, the same way session scratch under `/tmp` does.
 pub fn probe_home(home: &Path) -> Vec<Discovery> {
     // Resolved once, for the same reason each path below is: a home reached
     // through a symlink would not contain the canonical paths found under it,
@@ -283,24 +309,39 @@ pub fn probe_home(home: &Path) -> Vec<Discovery> {
         .filter_map(|location| {
             let path = location.resolve(home);
             let metadata = std::fs::symlink_metadata(&path).ok()?;
-            // A symlink is followed by nobody here: the table names real
-            // directories, and a link standing in for one is a fact about this
-            // machine that we did not verify.
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            let redirected = is_redirect(&metadata);
+            // A redirection's own metadata describes the link, so what it
+            // stands for is only known once resolved. Anything that does not
+            // resolve to a directory — dangling, or pointing at a file — is
+            // not the catalogued location and is left alone.
+            if !redirected && !metadata.is_dir() {
                 return None;
             }
             // Reported resolved, like traversal reports its findings. A home
             // reached through a symlink would otherwise produce discoveries
             // that no ignore rule written against the real path can match, and
             // that cleanup canonicalizes into something else again.
-            let path = crate::filesystem::canonical(&path).unwrap_or(path);
+            let path = crate::filesystem::canonical(&path).ok()?;
+            if redirected && !std::fs::metadata(&path).is_ok_and(|target| target.is_dir()) {
+                return None;
+            }
+            // `is_within` wants a strict ancestor, so the base is the parent
+            // rather than the directory itself. Only a redirection that leaves
+            // home needs one: staying inside keeps the narrower base, and a
+            // link landing at a filesystem root has no parent to register
+            // against and is refused rather than registered against nothing.
+            let discovery_root = if crate::filesystem::is_within(&root, &path) {
+                root.clone()
+            } else {
+                path.parent()?.to_path_buf()
+            };
             Some(Discovery {
                 path,
                 label: location.label,
                 category: location.category.clone(),
                 kind: location.kind,
                 owner: location.owner,
-                root: root.clone(),
+                root: discovery_root,
             })
         })
         .collect()
@@ -346,6 +387,15 @@ pub struct KnownLocationScanner {
     /// owner and the root are ours, and [`probe_temp`] is the only thing that
     /// can put a path in here.
     temp: Vec<PathBuf>,
+    /// Catalogued entries as they resolved on this machine.
+    ///
+    /// A moved cache is still the entry the table names, but its directory can
+    /// be called anything: `~/Library/pnpm/store` may lead to `pnpm-cache` on
+    /// another volume, and a name match against `store` would refuse it. The
+    /// path is still named in advance — [`probe_home`] reaches it only by
+    /// following a catalogued entry — so the name it landed under is vouched
+    /// for alongside the table's own.
+    resolved: Vec<PathBuf>,
 }
 
 impl KnownLocationScanner {
@@ -356,6 +406,7 @@ impl KnownLocationScanner {
     pub fn provider_set(home: PathBuf) -> ProviderSet {
         let mut providers = ProviderSet::new();
         let scratch = probe_temp(&home);
+        let catalogued = probe_home(&home);
         for category in [
             Category::XcodeDerivedData,
             Category::PackageManagerCache,
@@ -369,10 +420,18 @@ impl KnownLocationScanner {
                 })
                 .map(|discovery| discovery.path.clone())
                 .collect();
+            let resolved = catalogued
+                .iter()
+                .filter(|discovery| {
+                    discovery.category == category && discovery.kind != LocationKind::ReportOnly
+                })
+                .map(|discovery| discovery.path.clone())
+                .collect();
             providers.add_scanner(Self {
                 home: home.clone(),
                 category,
                 temp,
+                resolved,
             });
         }
         providers
@@ -403,13 +462,18 @@ impl Scanner for KnownLocationScanner {
             || self
                 .temp
                 .iter()
+                .chain(self.resolved.iter())
                 .any(|path| path.file_name().is_some_and(|segment| segment == name))
     }
 
     fn confirm_context(&self, path: &Path) -> bool {
         self.entries()
             .any(|location| same_path(&location.resolve(&self.home), path))
-            || self.temp.iter().any(|scratch| same_path(scratch, path))
+            || self
+                .temp
+                .iter()
+                .chain(self.resolved.iter())
+                .any(|known| same_path(known, path))
     }
 }
 
@@ -617,6 +681,33 @@ mod tests {
         }
     }
 
+    /// A directory outside the home tree, standing in for a second volume.
+    #[cfg(unix)]
+    struct Elsewhere(PathBuf);
+
+    #[cfg(unix)]
+    impl Elsewhere {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("uncached-elsewhere-{name}"));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(path.join("pnpm-cache")).expect("target fixture should be created");
+            Self(path.join("pnpm-cache"))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Elsewhere {
+        fn drop(&mut self) {
+            if let Some(parent) = self.0.parent() {
+                let _ = fs::remove_dir_all(parent);
+            }
+        }
+    }
+
     fn first_of_kind(kind: LocationKind) -> &'static KnownLocation {
         known_locations()
             .iter()
@@ -639,6 +730,205 @@ mod tests {
             "discoveries are reported resolved, like traversal reports its own"
         );
         assert_eq!(found[0].label, location.label);
+    }
+
+    /// A relocated cache: moved to a second volume, reached through the link.
+    ///
+    /// The whole reason the entry is worth finding is that it is large enough
+    /// to have been moved.
+    #[cfg(unix)]
+    #[test]
+    fn a_catalogued_entry_moved_elsewhere_is_still_found() {
+        let home = Home::new("relocated");
+        let elsewhere = Elsewhere::new("relocated-target");
+        let location = first_of_kind(LocationKind::SharedCache);
+        let link = location.resolve(home.path());
+        fs::create_dir_all(link.parent().expect("location should have a parent"))
+            .expect("parent should be created");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).expect("link should be created");
+
+        let found = probe_home(home.path());
+
+        assert_eq!(found.len(), 1, "a moved cache is still the catalogued entry");
+        assert_eq!(
+            found[0].path,
+            crate::filesystem::canonical(elsewhere.path()).expect("target should resolve"),
+            "the discovery names where the directory actually is"
+        );
+        assert_eq!(
+            found[0].root,
+            crate::filesystem::canonical(elsewhere.path())
+                .expect("target should resolve")
+                .parent()
+                .expect("target should have a parent")
+                .to_path_buf(),
+            "cleanup checks containment against the base it landed in, not home"
+        );
+    }
+
+    /// Discovering it is worth nothing if cleanup then refuses it: the target
+    /// is offered by one gate and rejected by the next, which is the failure
+    /// the `root` field was introduced to stop.
+    #[cfg(unix)]
+    #[test]
+    fn a_relocated_entry_is_vouched_for_by_its_provider() {
+        let home = Home::new("relocated-vouch");
+        let elsewhere = Elsewhere::new("relocated-vouch-target");
+        let location = first_of_kind(LocationKind::SharedCache);
+        let link = location.resolve(home.path());
+        fs::create_dir_all(link.parent().expect("location should have a parent"))
+            .expect("parent should be created");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).expect("link should be created");
+
+        let found = probe_home(home.path());
+        let discovery = found.first().expect("the relocated entry should be found");
+        let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
+        let scanner = providers
+            .scanner_for(&discovery.category)
+            .expect("the category should have a provider");
+
+        let name = discovery
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the target should have a name");
+        assert!(
+            scanner.matches(name),
+            "the directory it was moved into is named nothing like the entry"
+        );
+        assert!(
+            scanner.confirm_context(&discovery.path),
+            "the provider has to vouch for the path cleanup will be handed"
+        );
+    }
+
+    /// The gate that actually matters: cleanup has to accept what discovery
+    /// offered. A target the first gate reports and the second refuses is
+    /// worse than one never reported at all — the user is shown space they
+    /// cannot reclaim, and the refusal reads as a bug in the product.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_accepts_a_relocated_entry_it_was_offered() {
+        use crate::model::ScanTarget;
+
+        let home = Home::new("relocated-cleanup");
+        let elsewhere = Elsewhere::new("relocated-cleanup-target");
+        let location = first_of_kind(LocationKind::SharedCache);
+        let link = location.resolve(home.path());
+        fs::create_dir_all(link.parent().expect("location should have a parent"))
+            .expect("parent should be created");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).expect("link should be created");
+
+        let found = probe_home(home.path());
+        let discovery = found.first().expect("the relocated entry should be found");
+        let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
+        let target = ScanTarget::new(discovery.path.clone(), discovery.category.clone(), 0)
+            .with_identity(crate::filesystem::file_identity(&discovery.path));
+
+        let validated = crate::cleaner::validate_clean_target(&discovery.root, &providers, &target);
+
+        assert!(
+            validated.is_ok(),
+            "cleanup refused a relocated cache discovery offered: {:?}",
+            validated.err()
+        );
+    }
+
+    /// The Windows half of the same fact.
+    ///
+    /// A relocated cache here is usually a junction, whose reparse tag is
+    /// `MOUNT_POINT` rather than `SYMLINK` — which is why [`is_redirect`] reads
+    /// the attribute instead of trusting `is_symlink`. `junction_point` is
+    /// still unstable, so the test uses a directory symlink: it exercises the
+    /// same attribute bit through the same code path.
+    ///
+    /// Creating one needs Developer Mode or an elevated process. Where neither
+    /// holds, the test says so and stops rather than failing — the same shape
+    /// the Trash backend tests use when the platform will not cooperate.
+    #[cfg(windows)]
+    #[test]
+    fn a_catalogued_entry_moved_to_another_volume_is_still_found() {
+        let home = Home::new("relocated-windows");
+        let elsewhere = std::env::temp_dir().join("uncached-elsewhere-windows/pnpm-cache");
+        let _ = fs::remove_dir_all(elsewhere.parent().expect("target should have a parent"));
+        fs::create_dir_all(&elsewhere).expect("target fixture should be created");
+
+        let location = first_of_kind(LocationKind::SharedCache);
+        let link = location.resolve(home.path());
+        fs::create_dir_all(link.parent().expect("location should have a parent"))
+            .expect("parent should be created");
+
+        if std::os::windows::fs::symlink_dir(&elsewhere, &link).is_err() {
+            eprintln!("skipping: creating a directory link needs Developer Mode or elevation");
+            let _ = fs::remove_dir_all(elsewhere.parent().expect("target should have a parent"));
+            return;
+        }
+
+        let found = probe_home(home.path());
+
+        assert_eq!(found.len(), 1, "a moved cache is still the catalogued entry");
+        assert_eq!(
+            found[0].path,
+            crate::filesystem::canonical(&elsewhere).expect("target should resolve"),
+            "the discovery names where the directory actually is"
+        );
+
+        let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
+        let scanner = providers
+            .scanner_for(&found[0].category)
+            .expect("the category should have a provider");
+        let name = found[0]
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the target should have a name");
+        assert!(crate::scanner::Scanner::matches(scanner, name));
+        assert!(crate::scanner::Scanner::confirm_context(scanner, &found[0].path));
+
+        let _ = fs::remove_dir_all(elsewhere.parent().expect("target should have a parent"));
+    }
+
+    /// A link is only the entry if it leads to one.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_file_or_to_nothing_is_not_reported() {
+        let home = Home::new("relocated-broken");
+        let location = first_of_kind(LocationKind::SharedCache);
+        let link = location.resolve(home.path());
+        fs::create_dir_all(link.parent().expect("location should have a parent"))
+            .expect("parent should be created");
+
+        let file = home.path().join("a-file");
+        fs::write(&file, b"not a cache").expect("file fixture should be written");
+        std::os::unix::fs::symlink(&file, &link).expect("link should be created");
+        assert!(probe_home(home.path()).is_empty(), "a link to a file is not the entry");
+
+        fs::remove_file(&link).expect("link should be removed");
+        std::os::unix::fs::symlink(home.path().join("gone"), &link)
+            .expect("dangling link should be created");
+        assert!(probe_home(home.path()).is_empty(), "a dangling link is not the entry");
+    }
+
+    /// Moving a cache without leaving home keeps the narrower base.
+    #[cfg(unix)]
+    #[test]
+    fn a_redirect_that_stays_inside_home_keeps_home_as_its_root() {
+        let home = Home::new("relocated-inside");
+        let location = first_of_kind(LocationKind::SharedCache);
+        let target = home.create("moved-cache");
+        let link = location.resolve(home.path());
+        fs::create_dir_all(link.parent().expect("location should have a parent"))
+            .expect("parent should be created");
+        std::os::unix::fs::symlink(&target, &link).expect("link should be created");
+
+        let found = probe_home(home.path());
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].root,
+            crate::filesystem::canonical(home.path()).expect("home should resolve"),
+            "a redirection inside home does not need to widen the base"
+        );
     }
 
     #[test]
