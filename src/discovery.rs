@@ -102,6 +102,14 @@ pub struct KnownLocation {
 }
 
 impl KnownLocation {
+    /// See [`Discovery::reclaim_with`].
+    pub fn reclaim_with(&self) -> Option<&'static str> {
+        match self.relative {
+            "Library/Developer/CoreSimulator/Devices" => Some("xcrun simctl delete unavailable"),
+            _ => None,
+        }
+    }
+
     pub fn resolve(&self, home: &Path) -> PathBuf {
         self.relative
             .split('/')
@@ -208,6 +216,7 @@ pub fn probe_temp(home: &Path) -> Vec<Discovery> {
                 kind: location.kind,
                 owner: location.owner,
                 root,
+                reclaim_with: None,
             });
         }
     }
@@ -232,6 +241,66 @@ pub fn probe_temp(_home: &Path) -> Vec<Discovery> {
     Vec::new()
 }
 
+/// A machine-wide directory, named by absolute path.
+///
+/// Always [`LocationKind::ReportOnly`]: the type has no field that could say
+/// otherwise. These are root-owned, and only the owning tool removes them.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct SystemLocation {
+    label: &'static str,
+    path: &'static str,
+    category: Category,
+    owner: &'static [&'static str],
+    /// See [`Discovery::reclaim_with`].
+    reclaim_with: &'static str,
+}
+
+// `CoreSimulator/Volumes` is deliberately absent: it is where the runtime images
+// below are mounted, and sizing the mount counts their uncompressed contents.
+#[cfg(target_os = "macos")]
+static SYSTEM_LOCATIONS: &[SystemLocation] = &[SystemLocation {
+    label: "Simulator runtimes",
+    path: "/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime",
+    category: Category::XcodeDerivedData,
+    owner: &["Xcode", "Simulator"],
+    reclaim_with: "xcrun simctl runtime delete --notUsedSinceDays 30",
+}];
+
+#[cfg(not(target_os = "macos"))]
+static SYSTEM_LOCATIONS: &[SystemLocation] = &[];
+
+/// Machine-wide locations that exist, every one of them report-only.
+pub fn probe_system() -> Vec<Discovery> {
+    probe_absolute(SYSTEM_LOCATIONS)
+}
+
+/// Links are not followed: a system path redirected elsewhere is not the
+/// directory the table names.
+fn probe_absolute(locations: &[SystemLocation]) -> Vec<Discovery> {
+    locations
+        .iter()
+        .filter_map(|location| {
+            let path = Path::new(location.path);
+            let metadata = std::fs::symlink_metadata(path).ok()?;
+            if !metadata.is_dir() || is_redirect(&metadata) {
+                return None;
+            }
+            let path = crate::filesystem::canonical(path).ok()?;
+            let root = path.parent()?.to_path_buf();
+            Some(Discovery {
+                path,
+                label: location.label,
+                category: location.category.clone(),
+                kind: LocationKind::ReportOnly,
+                owner: location.owner,
+                root,
+                reclaim_with: Some(location.reclaim_with),
+            })
+        })
+        .collect()
+}
+
 /// A location from the table that exists on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Discovery {
@@ -251,6 +320,9 @@ pub struct Discovery {
     /// home as its root was one cleanup would refuse to remove, having offered
     /// it. The base travels with the discovery instead of being assumed.
     pub root: PathBuf,
+    /// Shell command, run by the user, that reclaims a `ReportOnly` location
+    /// through the tool that owns it. `None` when that tool has no command.
+    pub reclaim_with: Option<&'static str>,
 }
 
 /// The user's home directory, from the environment.
@@ -342,6 +414,7 @@ pub fn probe_home(home: &Path) -> Vec<Discovery> {
                 kind: location.kind,
                 owner: location.owner,
                 root: discovery_root,
+                reclaim_with: location.reclaim_with(),
             })
         })
         .collect()
@@ -560,10 +633,13 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Deno cache" => "Library/Caches/deno", PackageManagerCache, SharedCache, &["deno"];
     "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
     "Playwright browsers" => "Library/Caches/ms-playwright", PackageManagerCache, SharedCache, &[];
+    "uv cache" => ".cache/uv", PackageManagerCache, SharedCache, &["uv", "uvx"];
 
     "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
     "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
     "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState, &["claude"];
+    "Claude app cache" => "Library/Application Support/Claude/Cache", AiToolCache, ToolState, &["Claude"];
+    "Claude app code cache" => "Library/Application Support/Claude/Code Cache", AiToolCache, ToolState, &["Claude"];
     "Codex logs" => ".codex/log", AiToolCache, ToolState, &["codex"];
     "opencode cache" => ".cache/opencode", AiToolCache, ToolState, &["opencode"];
     "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState, &["opencode"];
@@ -595,6 +671,7 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Deno cache" => ".cache/deno", PackageManagerCache, SharedCache, &["deno"];
     "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
     "Playwright browsers" => ".cache/ms-playwright", PackageManagerCache, SharedCache, &[];
+    "uv cache" => ".cache/uv", PackageManagerCache, SharedCache, &["uv", "uvx"];
 
     "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
     "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
@@ -628,6 +705,7 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Deno cache" => "AppData/Local/deno", PackageManagerCache, SharedCache, &["deno"];
     "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
     "Playwright browsers" => "AppData/Local/ms-playwright", PackageManagerCache, SharedCache, &[];
+    "uv cache" => "AppData/Local/uv/cache", PackageManagerCache, SharedCache, &["uv", "uvx"];
 
     "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
     "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
@@ -749,7 +827,11 @@ mod tests {
 
         let found = probe_home(home.path());
 
-        assert_eq!(found.len(), 1, "a moved cache is still the catalogued entry");
+        assert_eq!(
+            found.len(),
+            1,
+            "a moved cache is still the catalogued entry"
+        );
         assert_eq!(
             found[0].path,
             crate::filesystem::canonical(elsewhere.path()).expect("target should resolve"),
@@ -866,7 +948,11 @@ mod tests {
 
         let found = probe_home(home.path());
 
-        assert_eq!(found.len(), 1, "a moved cache is still the catalogued entry");
+        assert_eq!(
+            found.len(),
+            1,
+            "a moved cache is still the catalogued entry"
+        );
         assert_eq!(
             found[0].path,
             crate::filesystem::canonical(&elsewhere).expect("target should resolve"),
@@ -883,7 +969,10 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("the target should have a name");
         assert!(crate::scanner::Scanner::matches(scanner, name));
-        assert!(crate::scanner::Scanner::confirm_context(scanner, &found[0].path));
+        assert!(crate::scanner::Scanner::confirm_context(
+            scanner,
+            &found[0].path
+        ));
 
         let _ = fs::remove_dir_all(elsewhere.parent().expect("target should have a parent"));
     }
@@ -901,12 +990,18 @@ mod tests {
         let file = home.path().join("a-file");
         fs::write(&file, b"not a cache").expect("file fixture should be written");
         std::os::unix::fs::symlink(&file, &link).expect("link should be created");
-        assert!(probe_home(home.path()).is_empty(), "a link to a file is not the entry");
+        assert!(
+            probe_home(home.path()).is_empty(),
+            "a link to a file is not the entry"
+        );
 
         fs::remove_file(&link).expect("link should be removed");
         std::os::unix::fs::symlink(home.path().join("gone"), &link)
             .expect("dangling link should be created");
-        assert!(probe_home(home.path()).is_empty(), "a dangling link is not the entry");
+        assert!(
+            probe_home(home.path()).is_empty(),
+            "a dangling link is not the entry"
+        );
     }
 
     /// Moving a cache without leaving home keeps the narrower base.
@@ -929,6 +1024,95 @@ mod tests {
             crate::filesystem::canonical(home.path()).expect("home should resolve"),
             "a redirection inside home does not need to widen the base"
         );
+    }
+
+    fn system_location(path: &Path) -> super::SystemLocation {
+        super::SystemLocation {
+            label: "Simulator runtimes",
+            path: Box::leak(path.to_string_lossy().into_owned().into_boxed_str()),
+            category: Category::XcodeDerivedData,
+            owner: &["Xcode"],
+            reclaim_with: "xcrun simctl runtime delete --notUsedSinceDays 30",
+        }
+    }
+
+    /// Found outside home, and refused by cleanup at the provider gate rather
+    /// than by anything the interface decides.
+    #[test]
+    fn a_system_location_is_reported_and_cleanup_refuses_it() {
+        use crate::model::ScanTarget;
+
+        let home = Home::new("system-home");
+        let machine = Home::new("system-machine");
+        let runtimes = machine.create("AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime");
+
+        let found = super::probe_absolute(&[system_location(&runtimes)]);
+
+        assert_eq!(found.len(), 1);
+        let discovery = &found[0];
+        assert_eq!(discovery.kind, LocationKind::ReportOnly);
+        assert_eq!(
+            discovery.reclaim_with,
+            Some("xcrun simctl runtime delete --notUsedSinceDays 30")
+        );
+        assert!(crate::filesystem::is_within(
+            &discovery.root,
+            &discovery.path
+        ));
+
+        let providers = KnownLocationScanner::provider_set(home.path().to_path_buf());
+        let name = discovery
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the target should have a name");
+        assert!(providers.classify(name, &discovery.path).is_none());
+
+        let target = ScanTarget::new(discovery.path.clone(), discovery.category.clone(), 0)
+            .with_identity(crate::filesystem::file_identity(&discovery.path));
+        assert!(
+            crate::cleaner::validate_clean_target(&discovery.root, &providers, &target).is_err(),
+            "a machine-wide location must never be removable"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_catalogued_report_only_entry_carries_its_owners_command() {
+        let home = Home::new("reclaim-with");
+        home.create("Library/Developer/CoreSimulator/Devices");
+        home.create("Library/Developer/Xcode/DerivedData");
+
+        let found = probe_home(home.path());
+        let command = |label: &str| {
+            found
+                .iter()
+                .find(|discovery| discovery.label == label)
+                .expect("fixture should be found")
+                .reclaim_with
+        };
+
+        assert_eq!(
+            command("Simulator devices"),
+            Some("xcrun simctl delete unavailable")
+        );
+        assert_eq!(command("Xcode DerivedData"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_or_redirected_system_location_is_skipped() {
+        let machine = Home::new("system-skipped");
+        let real = machine.create("real");
+        let link = machine.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link should be created");
+
+        let found = super::probe_absolute(&[
+            system_location(&machine.path().join("absent")),
+            system_location(&link),
+        ]);
+
+        assert!(found.is_empty());
     }
 
     #[test]
@@ -1021,6 +1205,7 @@ mod tests {
         };
         let mut found = probe_home(&home);
         found.extend(probe_temp(&home));
+        found.extend(super::probe_system());
         for discovery in &found {
             assert!(
                 discovery.path.starts_with(&discovery.root),
@@ -1040,6 +1225,7 @@ mod tests {
             kind: LocationKind::SharedCache,
             owner: &[],
             root: PathBuf::from("/home/user"),
+            reclaim_with: None,
         };
 
         assert_eq!(
@@ -1057,6 +1243,7 @@ mod tests {
             kind: LocationKind::ToolState,
             owner: &["claude"],
             root: PathBuf::from("/home/user"),
+            reclaim_with: None,
         };
 
         assert_eq!(
@@ -1074,6 +1261,7 @@ mod tests {
             kind: LocationKind::Artifact,
             owner: &["Xcode"],
             root: PathBuf::from("/home/user"),
+            reclaim_with: None,
         };
 
         assert_eq!(assess(signals_for(&discovery)).level, ConfidenceLevel::High);
