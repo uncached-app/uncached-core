@@ -382,6 +382,39 @@ fn cleanup_refuses_a_target_a_rule_excludes() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Unreal's `Saved` is not an artifact, whatever its siblings are.
+///
+/// Epic's directory reference puts autosaves, the project's `.ini` files and
+/// crash logs in it. A cleaner that offers it beside `Intermediate` is offering
+/// to delete work, so the provider claims the four that a build regenerates and
+/// leaves that one alone.
+#[test]
+fn an_unreal_project_keeps_what_a_build_does_not_regenerate() {
+    let root = fixture();
+    let project = root.join("game");
+    for name in [
+        "Binaries",
+        "Build",
+        "DerivedDataCache",
+        "Intermediate",
+        "Saved",
+    ] {
+        fs::create_dir_all(project.join(name)).unwrap();
+    }
+    fs::write(project.join("game.uproject"), b"{}").unwrap();
+
+    let found = categories(&root, &ProviderSet::all());
+
+    assert_eq!(
+        found
+            .iter()
+            .filter(|category| **category == Category::UnrealIntermediate)
+            .count(),
+        4,
+        "Saved holds autosaves, configuration and crash logs"
+    );
+}
+
 /// The names these providers claim are also ordinary directory names, and one
 /// of them is `Library`. Each has to be refused without its ecosystem's marker
 /// directly beside it, or the provider is a liability rather than a feature.

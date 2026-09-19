@@ -72,16 +72,13 @@ pub fn unity() -> ProjectScanner {
     )
 }
 
+/// `Saved` is deliberately absent. Epic's own directory reference puts
+/// autosaves, the project's `.ini` configuration and crash logs in it, none of
+/// which a build regenerates.
 pub fn unreal() -> ProjectScanner {
     ProjectScanner::new(
         Category::UnrealIntermediate,
-        &[
-            "Binaries",
-            "Build",
-            "Saved",
-            "DerivedDataCache",
-            "Intermediate",
-        ],
+        &["Binaries", "Build", "DerivedDataCache", "Intermediate"],
         ProjectMarker::AnyExtension(&["uproject"]),
     )
 }
