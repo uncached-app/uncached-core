@@ -66,6 +66,14 @@ pub struct DirectorySizeReport {
     pub bytes: u64,
     /// Number of entries that could not be read, or size additions that overflowed.
     pub errors: u64,
+    /// Newest modification time in the tree, in seconds since the Unix epoch.
+    ///
+    /// Answers how long ago a cache was last written to, which is the only
+    /// cheap signal there is for whether anything still depends on it. Taken
+    /// from files alone: a directory's own timestamp changes when its children
+    /// are listed on some systems, and a tree with no readable file has no
+    /// answer rather than a wrong one.
+    pub newest_modified: Option<i64>,
 }
 
 impl DirectorySizeReport {
@@ -82,6 +90,22 @@ fn add_file_size(report: &mut DirectorySizeReport, bytes: u64) {
         // Keep the partial total bounded, but make the loss visible to callers.
         report.bytes = u64::MAX;
         report.errors = report.errors.saturating_add(1);
+    }
+}
+
+/// Keeps the newest of the times seen. A clock that went backwards before the
+/// epoch is recorded as negative rather than discarded, so the comparison stays
+/// a comparison of instants.
+fn note_modified(report: &mut DirectorySizeReport, metadata: &std::fs::Metadata) {
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let seconds = match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => since.as_secs() as i64,
+        Err(before) => -(before.duration().as_secs() as i64),
+    };
+    if report.newest_modified.is_none_or(|newest| seconds > newest) {
+        report.newest_modified = Some(seconds);
     }
 }
 
@@ -167,6 +191,7 @@ pub fn directory_size_report_skipping(
             match entry.metadata() {
                 Ok(metadata) if metadata.is_file() => {
                     add_file_size(&mut report, metadata.len());
+                    note_modified(&mut report, &metadata);
                 }
                 Ok(_) => {}
                 Err(_) => report.errors = report.errors.saturating_add(1),
@@ -429,11 +454,54 @@ mod tests {
         )));
     }
 
+    /// The newest file in the tree is what says how long ago the cache was
+    /// written to, and a cache nothing has touched in months is the one a user
+    /// can decide about without opening it.
+    #[test]
+    fn sizing_reports_the_newest_file_in_the_tree() {
+        let root = test_tree("newest");
+        fs::create_dir_all(root.join("nested")).expect("fixture should be created");
+        fs::write(root.join("old.bin"), b"old").expect("file should be written");
+        fs::write(root.join("nested/new.bin"), b"new").expect("file should be written");
+
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(root.join("old.bin"))
+            .expect("file should open")
+            .set_modified(long_ago)
+            .expect("modification time should be settable");
+
+        let report = super::directory_size_report(&root).expect("fixture should be sized");
+        let newest = report
+            .newest_modified
+            .expect("a tree with files has an age");
+
+        assert!(
+            newest > 1_000_000_000,
+            "the newest file wins over the oldest one"
+        );
+
+        let empty = test_tree("empty");
+        fs::create_dir_all(&empty).expect("fixture should be created");
+        assert_eq!(
+            super::directory_size_report(&empty)
+                .expect("fixture should be sized")
+                .newest_modified,
+            None,
+            "a tree with no readable file has no answer to give"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&empty);
+    }
+
     #[test]
     fn sizing_report_marks_partial_results_and_overflow() {
         let mut report = DirectorySizeReport {
             bytes: u64::MAX,
             errors: 0,
+            newest_modified: None,
         };
 
         add_file_size(&mut report, 1);
@@ -449,6 +517,15 @@ mod tests {
         let result = super::directory_size_report_with_cancel(Path::new("missing"), &cancelled);
 
         assert!(result.unwrap().is_none());
+    }
+
+    /// A directory of its own per case: `unique_test_path` is one path for the
+    /// whole module, and another test leaves a file standing there.
+    fn test_tree(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("uncached-core-size-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        path
     }
 
     fn unique_test_path() -> PathBuf {
