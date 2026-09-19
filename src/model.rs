@@ -77,6 +77,9 @@ pub enum Category {
     AiToolCache,
     /// Indexes and caches written by an editor or IDE.
     EditorCache,
+    /// The Android SDK's machine-wide downloads and the emulators built from
+    /// them. Nowhere near a project: one copy serves every app on the machine.
+    AndroidSdk,
     Custom(String),
 }
 
@@ -118,6 +121,7 @@ impl Category {
             Self::PackageManagerCache => "PackageManagerCache".to_owned(),
             Self::AiToolCache => "AiToolCache".to_owned(),
             Self::EditorCache => "EditorCache".to_owned(),
+            Self::AndroidSdk => "AndroidSdk".to_owned(),
             Self::Custom(name) => format!("{CUSTOM_CATEGORY_PREFIX}{name}"),
         }
     }
@@ -164,6 +168,7 @@ impl Category {
             "PackageManagerCache" => Self::PackageManagerCache,
             "AiToolCache" => Self::AiToolCache,
             "EditorCache" => Self::EditorCache,
+            "AndroidSdk" => Self::AndroidSdk,
             _ => {
                 let name = value.strip_prefix(CUSTOM_CATEGORY_PREFIX)?;
                 if !valid_custom_category_name(name) {
@@ -320,6 +325,7 @@ mod tests {
             (Category::PackageManagerCache, "PackageManagerCache"),
             (Category::AiToolCache, "AiToolCache"),
             (Category::EditorCache, "EditorCache"),
+            (Category::AndroidSdk, "AndroidSdk"),
         ] {
             assert_eq!(serde_json::to_value(&category).unwrap(), json!(expected));
             assert_eq!(Category::from_wire(expected), Some(category));

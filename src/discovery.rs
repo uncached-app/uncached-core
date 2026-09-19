@@ -106,6 +106,10 @@ impl KnownLocation {
     pub fn reclaim_with(&self) -> Option<&'static str> {
         match self.relative {
             "Library/Developer/CoreSimulator/Devices" => Some("xcrun simctl delete unavailable"),
+            ".android/avd" => Some("avdmanager delete avd -n <name>"),
+            "Library/Containers/com.docker.docker/Data/vms/0/data"
+            | ".docker/desktop/vms/0/data"
+            | "AppData/Local/Docker/wsl/data" => Some("docker system prune"),
             _ => None,
         }
     }
@@ -485,6 +489,9 @@ impl KnownLocationScanner {
             Category::PackageManagerCache,
             Category::AiToolCache,
             Category::EditorCache,
+            Category::UnityLibrary,
+            Category::GodotCache,
+            Category::AndroidSdk,
         ] {
             let temp = scratch
                 .iter()
@@ -583,8 +590,10 @@ macro_rules! locations {
     };
 }
 
-use Category::{AiToolCache, EditorCache, PackageManagerCache};
-use LocationKind::{Artifact, SharedCache, ToolState};
+use Category::{
+    AiToolCache, AndroidSdk, Docker, EditorCache, GodotCache, PackageManagerCache, UnityLibrary,
+};
+use LocationKind::{Artifact, ReportOnly, SharedCache, ToolState};
 
 // Only the macOS catalogue names these. Imported unconditionally they are dead
 // on Linux and Windows, and a warning that is expected on two of three
@@ -593,8 +602,6 @@ use LocationKind::{Artifact, SharedCache, ToolState};
 // tests are unaffected.
 #[cfg(target_os = "macos")]
 use Category::XcodeDerivedData;
-#[cfg(target_os = "macos")]
-use LocationKind::ReportOnly;
 
 // `Archives` and `CoreSimulator/Devices` are catalogued as `ReportOnly`. They
 // are usually the two heaviest directories Xcode owns, and neither is ours to
@@ -635,6 +642,29 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Playwright browsers" => "Library/Caches/ms-playwright", PackageManagerCache, SharedCache, &[];
     "uv cache" => ".cache/uv", PackageManagerCache, SharedCache, &["uv", "uvx"];
 
+    "Unity package cache" => "Library/Caches/Unity/upm", UnityLibrary, SharedCache, &["Unity"];
+    "Unity Asset Store packages" => "Library/Unity/Asset Store-5.x", UnityLibrary, ToolState, &["Unity"];
+    "Unity build cache" => "Library/Unity/cache/bee", UnityLibrary, ToolState, &["Unity"];
+    "Godot editor cache" => "Library/Caches/Godot", GodotCache, Artifact, &["Godot"];
+    "Godot export templates" => "Library/Application Support/Godot/export_templates", GodotCache, SharedCache, &["Godot"];
+
+    // Android's SDK downloads one copy of a system image for every project on
+    // the machine; an emulator built from one holds whatever was installed
+    // inside it, which is why only the first is cleanable.
+    "Android system images" => "Library/Android/sdk/system-images", AndroidSdk, SharedCache, &["emulator", "qemu-system-aarch64", "studio"];
+    "Android emulators" => ".android/avd", AndroidSdk, ReportOnly, &["emulator", "qemu-system-aarch64"];
+
+    // One file holds every image, volume and container, including images built
+    // here and pushed nowhere. Docker's own prune is the only safe way in.
+    "Docker disk image" => "Library/Containers/com.docker.docker/Data/vms/0/data", Docker, ReportOnly, &["com.docker.backend", "Docker Desktop", "docker"];
+
+    "Ollama models" => ".ollama/models", AiToolCache, ToolState, &["ollama"];
+
+    "nvm download cache" => ".nvm/.cache", PackageManagerCache, SharedCache, &[];
+    "Node versions (nvm)" => ".nvm/versions/node", PackageManagerCache, ToolState, &["node"];
+    "pyenv build cache" => ".pyenv/cache", PackageManagerCache, SharedCache, &[];
+    "Python versions (pyenv)" => ".pyenv/versions", PackageManagerCache, ToolState, &["python", "python3"];
+
     "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
     "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
     "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState, &["claude"];
@@ -673,6 +703,22 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Playwright browsers" => ".cache/ms-playwright", PackageManagerCache, SharedCache, &[];
     "uv cache" => ".cache/uv", PackageManagerCache, SharedCache, &["uv", "uvx"];
 
+    "Unity package cache" => ".cache/Unity/upm", UnityLibrary, SharedCache, &["Unity"];
+    "Unity Asset Store packages" => ".local/share/unity3d/Asset Store-5.x", UnityLibrary, ToolState, &["Unity"];
+    "Unity build cache" => ".cache/unity3d/bee", UnityLibrary, ToolState, &["Unity"];
+    "Godot editor cache" => ".cache/godot", GodotCache, Artifact, &["Godot"];
+    "Godot export templates" => ".local/share/godot/export_templates", GodotCache, SharedCache, &["Godot"];
+
+    "Android system images" => "Android/Sdk/system-images", AndroidSdk, SharedCache, &["emulator", "qemu-system-x86_64", "studio"];
+    "Android emulators" => ".android/avd", AndroidSdk, ReportOnly, &["emulator", "qemu-system-x86_64"];
+
+    "Docker disk image" => ".docker/desktop/vms/0/data", Docker, ReportOnly, &["com.docker.backend", "docker"];
+
+    "nvm download cache" => ".nvm/.cache", PackageManagerCache, SharedCache, &[];
+    "Node versions (nvm)" => ".nvm/versions/node", PackageManagerCache, ToolState, &["node"];
+    "pyenv build cache" => ".pyenv/cache", PackageManagerCache, SharedCache, &[];
+    "Python versions (pyenv)" => ".pyenv/versions", PackageManagerCache, ToolState, &["python", "python3"];
+
     "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
     "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
     "Claude Code session environment" => ".claude/session-env", AiToolCache, ToolState, &["claude"];
@@ -706,6 +752,24 @@ static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
     "Playwright browsers" => "AppData/Local/ms-playwright", PackageManagerCache, SharedCache, &[];
     "uv cache" => "AppData/Local/uv/cache", PackageManagerCache, SharedCache, &["uv", "uvx"];
+
+    // Godot's own cache directory is the one path its documentation gives two
+    // answers for, so it is not catalogued here: `%TEMP%\\Godot` in the data
+    // paths guide, `%LOCALAPPDATA%\\Godot` in the class reference. Export
+    // templates are stated once and agree with the other platforms.
+    "Unity package cache" => "AppData/Local/Unity/cache/upm", UnityLibrary, SharedCache, &["Unity"];
+    "Unity Asset Store packages" => "AppData/Roaming/Unity/Asset Store-5.x", UnityLibrary, ToolState, &["Unity"];
+    "Unity build cache" => "AppData/Local/Unity/Caches/bee", UnityLibrary, ToolState, &["Unity"];
+    "Godot export templates" => "AppData/Roaming/Godot/export_templates", GodotCache, SharedCache, &["Godot"];
+
+    // The emulator directory is left out here: Android's own documentation
+    // prints two different Windows layouts for it, and neither agrees with the
+    // SDK root it documents elsewhere.
+    "Android system images" => "AppData/Local/Android/Sdk/system-images", AndroidSdk, SharedCache, &["emulator", "qemu-system-x86_64", "studio"];
+
+    "Docker disk image" => "AppData/Local/Docker/wsl/data", Docker, ReportOnly, &["com.docker.backend", "Docker Desktop", "docker"];
+
+    "Ollama models" => ".ollama/models", AiToolCache, ToolState, &["ollama"];
 
     "Claude Code shell snapshots" => ".claude/shell-snapshots", AiToolCache, ToolState, &["claude"];
     "Claude Code IDE locks" => ".claude/ide", AiToolCache, ToolState, &["claude"];
@@ -1097,6 +1161,22 @@ mod tests {
             Some("xcrun simctl delete unavailable")
         );
         assert_eq!(command("Xcode DerivedData"), None);
+
+        home.create(".android/avd");
+        home.create("Library/Containers/com.docker.docker/Data/vms/0/data");
+        let found = probe_home(home.path());
+        let command = |label: &str| {
+            found
+                .iter()
+                .find(|discovery| discovery.label == label)
+                .expect("fixture should be found")
+                .reclaim_with
+        };
+        assert_eq!(
+            command("Android emulators"),
+            Some("avdmanager delete avd -n <name>")
+        );
+        assert_eq!(command("Docker disk image"), Some("docker system prune"));
     }
 
     #[cfg(unix)]
@@ -1401,6 +1481,17 @@ mod tests {
             "AppData/Local/JetBrains",
             // Read-only by design, so a permanent delete can fail partway.
             "go/pkg/mod",
+            // Removing the version in use breaks the environment until it is
+            // installed again, and neither tool names which that is on disk.
+            ".nvm/versions/node",
+            ".pyenv/versions",
+            // Re-pullable, but tens of gigabytes over a network.
+            ".ollama/models",
+            // A package delisted from the Asset Store cannot be downloaded
+            // again, and this cache holds the last copy of it.
+            "Library/Unity/Asset Store-5.x",
+            ".local/share/unity3d/Asset Store-5.x",
+            "AppData/Roaming/Unity/Asset Store-5.x",
         ] {
             let Some(location) = known_locations()
                 .iter()
