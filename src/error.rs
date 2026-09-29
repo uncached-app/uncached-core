@@ -32,6 +32,9 @@ pub enum CoreErrorCode {
     SecureTrashOperationFailed,
     SecureTrashAborted,
     SecureTrashPostconditionFailed,
+    /// A running program holds the target. `operation` carries that
+    /// program's name, the one detail the reader needs to act on it.
+    TargetInUse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -124,6 +127,8 @@ pub enum CoreError {
     SecureTrashAborted { path: PathBuf },
     #[error("secure Trash postcondition failed for {path}")]
     SecureTrashPostconditionFailed { path: PathBuf },
+    #[error("target is in use by {program}")]
+    TargetInUse { program: String },
 }
 
 impl CoreError {
@@ -280,6 +285,12 @@ impl CoreError {
                 Some(path.to_string_lossy().into_owned()),
                 None,
             ),
+            Self::TargetInUse { program } => (
+                CoreErrorCode::TargetInUse,
+                "target is in use by a running program",
+                None,
+                Some(program.clone()),
+            ),
         };
 
         CoreErrorInfo {
@@ -328,10 +339,11 @@ mod tests {
             CoreErrorCode::SecureTrashOperationFailed => "secure_trash_operation_failed",
             CoreErrorCode::SecureTrashAborted => "secure_trash_aborted",
             CoreErrorCode::SecureTrashPostconditionFailed => "secure_trash_postcondition_failed",
+            CoreErrorCode::TargetInUse => "target_in_use",
         }
     }
 
-    const ALL_CODES: [CoreErrorCode; 25] = [
+    const ALL_CODES: [CoreErrorCode; 26] = [
         CoreErrorCode::InvalidWorkspace,
         CoreErrorCode::Io,
         CoreErrorCode::ProviderUnavailable,
@@ -357,6 +369,7 @@ mod tests {
         CoreErrorCode::SecureTrashOperationFailed,
         CoreErrorCode::SecureTrashAborted,
         CoreErrorCode::SecureTrashPostconditionFailed,
+        CoreErrorCode::TargetInUse,
     ];
 
     fn io_error() -> std::io::Error {
@@ -444,6 +457,9 @@ mod tests {
             },
             CoreError::SecureTrashPostconditionFailed {
                 path: "target".into(),
+            },
+            CoreError::TargetInUse {
+                program: "Xcode".into(),
             },
         ]
     }
