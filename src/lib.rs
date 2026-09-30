@@ -1,6 +1,7 @@
 pub mod cleaner;
 pub mod confidence;
 pub mod contract;
+pub mod dependencies;
 pub mod discovery;
 pub mod error;
 pub mod filesystem;
@@ -15,6 +16,10 @@ mod secure_cleanup;
 pub use cleaner::{clean_permanently, clean_to_trash, validate_clean_target};
 pub use confidence::{
     assess, collect_signals, Confidence, ConfidenceInput, ConfidenceLevel, ConfidenceSignal,
+};
+pub use dependencies::{
+    analyse_manifest, analyse_project, DependencyKind, DependencyReport, Ecosystem, ManifestError,
+    ProjectDependencies, UnusedDependency, UnusedReason,
 };
 pub use discovery::{
     home_directory, known_locations, probe_home, probe_system, probe_temp, Discovery,
