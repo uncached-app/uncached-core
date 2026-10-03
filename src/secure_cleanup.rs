@@ -97,6 +97,18 @@ impl SecureTarget {
             BackendTarget::Windows(target) => target.move_to_trash(),
             #[cfg(all(unix, not(target_os = "android")))]
             BackendTarget::Unix { path, identity } => {
+                // The last check this crate can make. What follows is the `trash`
+                // crate's own path-based move: it canonicalizes the *parent* and
+                // keeps the final name (so a symlink swapped in for the target
+                // is moved as a link, not followed), then renames that name into
+                // the Trash. Between this check and that rename someone who can
+                // write to the parent directory could swap the target for
+                // another directory, and the other one would be moved. The
+                // destination is the Trash, so the result is recoverable, and
+                // closing the window would mean reimplementing the freedesktop
+                // spec on file descriptors, which cannot be verified on macOS
+                // from here. Permanent deletion has no such window: it works
+                // through a pinned descriptor (`delete_unix_target`).
                 verify_unix_identity(&path, identity)?;
                 trash::delete(&path).map_err(|error| CoreError::SecureTrashOperationFailed {
                     path,
