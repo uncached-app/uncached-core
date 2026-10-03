@@ -27,9 +27,12 @@ pub use provider::KnownLocationScanner;
 
 #[cfg(test)]
 use {
-    probe::{is_session_scratch, probe_absolute, SystemLocation},
+    probe::{probe_absolute, SystemLocation},
     provider::last_segment,
 };
+// Unix-only, like the function: there is no session scratch to recognise elsewhere.
+#[cfg(all(test, unix))]
+use probe::is_session_scratch;
 
 #[cfg(test)]
 mod tests;
