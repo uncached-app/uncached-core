@@ -16,6 +16,10 @@ depends on it by git revision.
 | `dependencies` | Declared dependencies nothing in a project names, for `package.json` and `Cargo.toml`, with the command that removes each. |
 | `ignore_rules` | User rules that keep paths out of a scan. |
 | `contract` | The versioned types the app receives over IPC. |
+| `model` | The plain types the rest share: `Category`, `ScanTarget`, `LocationKind`, `FileIdentity`, `CleanReport`. |
+| `filesystem` | Canonical paths, workspace and deletion-safety checks, directory sizing, file identity and the marker-file helpers providers use. |
+| `error` | `CoreError` and the stable, serializable codes the app sees instead of native error text. |
+| `secure_cleanup` | Internal. The per-platform backends that pin a target by identity and then remove it or move it to the Trash. |
 
 ## Development
 
