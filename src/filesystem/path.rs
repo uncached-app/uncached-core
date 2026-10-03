@@ -32,39 +32,8 @@ pub fn canonical_workspace(root: &Path) -> CoreResult<PathBuf> {
         return Err(CoreError::InvalidWorkspace(root.display().to_string()));
     }
     let canonical = crate::filesystem::canonical(root).map_err(CoreError::from)?;
-    #[cfg(target_os = "linux")]
-    if is_protected_linux_workspace(&canonical) {
+    if super::protected::refuses_workspace(&canonical) {
         return Err(CoreError::InvalidWorkspace(canonical.display().to_string()));
     }
     Ok(canonical)
-}
-
-#[cfg(target_os = "linux")]
-fn is_protected_linux_workspace(path: &Path) -> bool {
-    path == Path::new("/")
-        || [
-            "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/root", "/run", "/sbin", "/sys",
-            "/usr", "/var",
-        ]
-        .iter()
-        .map(Path::new)
-        .any(|protected| path.starts_with(protected))
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use std::path::Path;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_system_workspaces_are_protected_without_blocking_home_projects() {
-        assert!(super::is_protected_linux_workspace(Path::new("/etc")));
-        assert!(super::is_protected_linux_workspace(Path::new("/usr/local")));
-        assert!(!super::is_protected_linux_workspace(Path::new(
-            "/home/user/project"
-        )));
-        assert!(!super::is_protected_linux_workspace(Path::new(
-            "/tmp/project"
-        )));
-    }
 }

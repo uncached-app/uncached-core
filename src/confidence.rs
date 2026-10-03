@@ -66,24 +66,6 @@ const VERSION_MANAGER_DIRECTORIES: &[&str] = &[
     ".nvm", ".volta", ".fnm", ".asdf", ".rbenv", ".pyenv", ".nodenv", ".rustup", ".sdkman",
 ];
 
-/// Roots owned by the operating system rather than by a user's projects.
-///
-/// `/var` is deliberately absent: macOS keeps per-user temporary directories
-/// under `/private/var`, so treating it as a system path would mislabel
-/// ordinary scratch space. Deletion under critical directories is refused by
-/// `filesystem::is_safe_to_delete` regardless of what confidence reports.
-#[cfg(not(windows))]
-const SYSTEM_ROOTS: &[&str] = &[
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/etc",
-    "/opt",
-    "/System",
-    "/Library",
-    "/Applications",
-];
-
 /// How far up the tree to look for `.gitignore` files before giving up. Deep
 /// enough for a monorepo, bounded so a pathological path cannot walk forever.
 const MAX_IGNORE_DEPTH: usize = 32;
@@ -181,7 +163,7 @@ pub fn collect_signals(path: &Path, known_artifact: bool) -> ConfidenceInput {
         git_ignored: gitignore_signal(path),
         git_tracked: None,
         version_manager_path: is_version_manager_path(path),
-        system_path: is_system_path(path),
+        system_path: crate::filesystem::demotes_confidence(path),
         location_kind: None,
     }
 }
@@ -258,29 +240,6 @@ fn is_version_directory(name: &str) -> bool {
         && digits
             .chars()
             .all(|character| character.is_ascii_digit() || character == '.')
-}
-
-#[cfg(not(windows))]
-fn is_system_path(path: &Path) -> bool {
-    SYSTEM_ROOTS
-        .iter()
-        .any(|root| path.starts_with(root) && path != Path::new(root))
-}
-
-#[cfg(windows)]
-fn is_system_path(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().to_lowercase();
-    [
-        std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string()),
-        std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string()),
-        std::env::var("ProgramFiles(x86)")
-            .unwrap_or_else(|_| r"C:\Program Files (x86)".to_string()),
-    ]
-    .iter()
-    .any(|root| {
-        let root = root.trim_end_matches(['\\', '/']).to_lowercase();
-        normalized.starts_with(&(root + "\\"))
-    })
 }
 
 fn lowercase_components(path: &Path) -> Vec<String> {
