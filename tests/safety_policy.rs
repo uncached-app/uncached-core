@@ -140,17 +140,17 @@ mod disagreements {
     }
 }
 
-/// The workspace rule is only enforced on Linux. On every other platform any
-/// existing directory is accepted as a scan root, whatever it is: a known gap,
-/// stated in `filesystem::protected`.
-#[cfg(target_os = "linux")]
-mod linux_workspace_rule {
+/// The workspace rule is enforced on Linux and macOS, and on Windows below.
+/// Existing system directories are used so the check goes through the real
+/// canonicalisation; on macOS that is what turns `/etc` into `/private/etc`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix_workspace_rule {
     use std::path::Path;
     use uncached_core::filesystem;
 
     #[test]
     fn system_roots_are_not_accepted_as_a_workspace() {
-        for path in ["/", "/usr", "/etc", "/var"] {
+        for path in ["/", "/usr", "/etc", "/var", "/bin", "/sbin"] {
             if Path::new(path).is_dir() {
                 assert!(
                     filesystem::canonical_workspace(Path::new(path)).is_err(),
@@ -180,5 +180,40 @@ mod linux_workspace_rule {
         std::fs::create_dir_all(&root).unwrap();
         assert!(filesystem::canonical_workspace(&root).is_ok());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// Windows has no `/usr`; its system directories come from the environment, and
+/// a project directory does not live in them.
+#[cfg(windows)]
+mod windows_workspace_rule {
+    use std::path::PathBuf;
+    use uncached_core::filesystem;
+
+    fn from_env(name: &str) -> Option<PathBuf> {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+    }
+
+    #[test]
+    fn the_windows_and_program_files_trees_are_not_accepted_as_a_workspace() {
+        for name in ["SystemRoot", "ProgramFiles"] {
+            let Some(dir) = from_env(name) else { continue };
+            assert!(filesystem::canonical_workspace(&dir).is_err(), "{name}");
+            let below = dir.join("System32");
+            if below.is_dir() {
+                assert!(filesystem::canonical_workspace(&below).is_err(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_project_directory_is_accepted() {
+        let root = std::env::temp_dir().join(format!("uncached-policy-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let accepted = filesystem::canonical_workspace(&root).is_ok();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(accepted);
     }
 }

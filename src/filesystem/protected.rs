@@ -17,6 +17,11 @@
 //! deletion gate refuses the directory itself and relies on workspace
 //! containment and the providers for what is beneath it; on Windows it refuses
 //! the whole tree.
+//!
+//! Callers hand these functions a *canonical* path, and canonical is where the
+//! platforms differ most. On macOS `/etc` and `/var` are symlinks into
+//! `/private`, so the rows that name them would never match what a caller
+//! actually holds; the table lists the `/private` spelling as well.
 
 use std::path::Path;
 
@@ -67,11 +72,13 @@ const fn root(path: &'static str, workspace: Option<Reach>, confidence: Option<R
 
 /// Whether the workspace rule is enforced on this platform.
 ///
-/// Only Linux, as it always was. On macOS and Windows any existing directory is
-/// accepted as a scan root, whatever it is: a known gap, kept visible here so it
-/// is a decision somebody makes rather than an `if` somebody forgets.
+/// Linux and macOS, whose system locations the table names. It used to be Linux
+/// only, which let a scan root on macOS be `/`, `/usr` or `/etc`; Windows has
+/// its own rule below. Anywhere else the table does not describe the system, so
+/// any existing directory is accepted, and that stays a decision made here
+/// rather than an `if` somebody forgets.
 #[cfg(not(windows))]
-const WORKSPACE_RULE_ENFORCED: bool = cfg!(target_os = "linux");
+const WORKSPACE_RULE_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
 
 #[cfg(not(windows))]
 const W: Option<Reach> = Some(Reach::Within);
@@ -98,6 +105,12 @@ static ROOTS: &[Root] = &[
     root("/proc", W, B),
     root("/sys", W, B),
     root("/run", W, B),
+    // What macOS's `/etc` and `/var` really are. A canonical path never says
+    // `/etc`, it says `/private/etc`. `/private/var` is refused as a scan root
+    // and as a deletion only itself: the per-user temporary directories are
+    // beneath it, and a project kept there is not the operating system's.
+    root("/private/etc", W, B),
+    root("/private/var", Some(Reach::Itself), NO),
     // macOS system locations. Nobody scans these as a workspace and nothing a
     // project builds lives under them.
     root("/System", NO, B),
@@ -144,8 +157,9 @@ pub(crate) fn demotes_confidence(path: &Path) -> bool {
 }
 
 /// On Windows the roots come from the environment, so the table is built when
-/// asked. The deletion gate refuses the whole tree; the scan-root rule is not
-/// enforced (see `WORKSPACE_RULE_ENFORCED` for the other platforms).
+/// asked. The deletion gate and the scan-root rule both refuse the whole tree:
+/// there is no Windows system directory a project lives in. A drive root is
+/// left usable, unlike `/` — a second drive is an ordinary place to keep code.
 #[cfg(windows)]
 fn roots() -> [String; 3] {
     [
@@ -166,8 +180,8 @@ pub(crate) fn refuses_deletion(path: &Path) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) fn refuses_workspace(_path: &Path) -> bool {
-    false
+pub(crate) fn refuses_workspace(path: &Path) -> bool {
+    refuses_deletion(path)
 }
 
 #[cfg(windows)]
@@ -255,7 +269,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_workspace_rule_refuses_system_roots_and_not_projects() {
         for path in [
@@ -267,11 +281,36 @@ mod tests {
             "/lib64",
             "/var",
             "/root",
+            "/private/etc",
+            "/private/etc/ssl",
+            "/private/var",
         ] {
             assert!(refuses_workspace(Path::new(path)), "{path}");
         }
-        for path in ["/opt", "/home", "/home/someone/project", "/tmp/project"] {
+        for path in [
+            "/opt",
+            "/home",
+            "/home/someone/project",
+            "/tmp/project",
+            "/private/tmp/project",
+            "/private/var/folders/ab/cd/T/project",
+            "/Users/someone/project",
+        ] {
             assert!(!refuses_workspace(Path::new(path)), "{path}");
         }
+    }
+
+    /// What a canonical path on macOS looks like. The scratch directories every
+    /// process gets live under `/private/var/folders`, so the table must not
+    /// treat the whole of `/private/var` as the system's.
+    #[test]
+    fn macos_spellings_protect_the_directory_and_not_the_scratch_space() {
+        assert!(refuses_deletion(Path::new("/private/etc")));
+        assert!(refuses_deletion(Path::new("/private/var")));
+        assert!(!refuses_deletion(Path::new("/private/var/folders/ab/cd/T")));
+        assert!(demotes_confidence(Path::new("/private/etc/thing/target")));
+        assert!(!demotes_confidence(Path::new(
+            "/private/var/folders/ab/cd/T/x"
+        )));
     }
 }
