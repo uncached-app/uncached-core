@@ -95,3 +95,37 @@ worker pool. Entries are appended in frontier order rather than completion order
 so the collection stays deterministic and a parent always precedes its
 descendants — the invariant permanent deletion relies on when it drains the
 collection in reverse.
+
+## Provider Classification
+
+`ProviderSet::classify` asks each registered provider, in order, whether it
+matches a directory name, and only for a match does it look at the filesystem
+(a marker file, a `.gitignore`). With the full built-in set of 29 providers the
+name test therefore runs 29 times for every directory that matches nothing,
+which is nearly all of them.
+
+Measured with the example that ships for the purpose:
+
+```text
+cargo run --release --example classify-cost -- <directory>
+```
+
+On the development host, over a 1,678-directory copy of the Cargo registry
+sources, and over a 71-directory checkout, warm cache:
+
+```text
+classify alone: about 640-760 ns per directory
+share of the walk: about 5-9 per cent
+```
+
+Those figures are host-specific, vary by a few per cent between runs, and are
+not general performance claims. The walk itself costs about 8 microseconds per
+directory here, and on a cold disk it costs far more, so the share only gets
+smaller.
+
+That is why classification is not indexed by name. An index would need the
+public `Scanner` trait to say which names a provider claims, and would save at
+most the few milliseconds a 100,000-directory scan spends on name tests,
+against seconds of directory reads. If a future provider makes `matches` or
+`confirm_context` expensive, measure again with the example above before
+changing anything.
