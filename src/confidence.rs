@@ -13,8 +13,8 @@
 //! separate cost axis: a `node_modules` installed five minutes ago is exactly
 //! as disposable as one from last year, it just costs more to remove.
 
-use crate::discovery::LocationKind;
 use crate::filesystem::{has_marker_file, has_marker_with_extension};
+use crate::model::LocationKind;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

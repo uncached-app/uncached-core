@@ -11,6 +11,59 @@ pub enum TraversalOutcome {
     Cancelled,
 }
 
+/// What deleting a location actually costs.
+///
+/// This is a different question from confidence. Confidence asks whether we
+/// identified the thing correctly; kind asks what happens once it is gone.
+/// Both feed the level, and only [`LocationKind::Artifact`] can reach `High`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationKind {
+    /// Regenerable output. Deleting it costs one rebuild of one thing.
+    Artifact,
+    /// A registry, store or download cache shared by every project.
+    ///
+    /// Deleting it recovers space and makes every future install slower —
+    /// including the installs that follow the cleanup this product just did.
+    /// Emptying the pnpm store is the most self-defeating action a disk
+    /// cleaner can take, so a shared cache is never offered as `High` and never
+    /// enters automation.
+    SharedCache,
+    /// State belonging to a tool rather than to a build.
+    ///
+    /// Two different problems land here, and both mean the same thing to the
+    /// user: look before you remove this.
+    ///
+    /// The first is content nothing regenerates, mixed in with content that
+    /// does. `~/.m2/repository` holds crates fetched from a registry next to
+    /// artifacts a local `mvn install` put there, which may be the only copy in
+    /// existence. A JetBrains cache directory holds indexes beside Local
+    /// History, the IDE's own record of edits to files that were never
+    /// committed. Both look like caches from the outside.
+    ///
+    /// The second is removal that cannot be relied on to finish. Go marks its
+    /// module cache read-only, so a permanent delete can fail partway and leave
+    /// a broken cache behind — worse than not having tried.
+    ///
+    /// Reported so the user can see the size, always at `Review`.
+    ToolState,
+    /// Weight worth knowing about that this product will not remove.
+    ///
+    /// Some of the largest directories a developer owns are neither artifacts
+    /// nor caches: a simulator device holds whatever was installed and
+    /// configured inside it, and an Xcode archive holds the dSYMs that are the
+    /// only way to symbolicate a crash from a release already in users' hands.
+    /// Deleting either is a real decision with a real cost, and the tool that
+    /// wrote them usually has a safer way to reclaim the space than removing
+    /// the directory — `xcrun simctl delete unavailable` prunes exactly the
+    /// devices macOS orphaned and leaves the rest alone.
+    ///
+    /// So the entry exists to report the size and name that operation. No
+    /// provider vouches for it, which means cleanup refuses it at the same gate
+    /// that refuses a misidentified path: the guarantee is structural, not a
+    /// button that happens to be hidden.
+    ReportOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Category {
     NodeModules,

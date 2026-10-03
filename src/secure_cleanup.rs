@@ -15,6 +15,10 @@ pub(crate) use windows::install_shell_item_boundary_hook;
 pub(crate) struct CleanupCapabilities {
     pub(crate) permanent: bool,
     pub(crate) trash: bool,
+    /// Whether a stable filesystem identity can be read and checked on this
+    /// platform. Not a cleanup backend itself, but it travels with them: it is
+    /// true exactly where a secure backend exists.
+    pub(crate) secure_identity: bool,
 }
 
 /// The cleanup a caller intends to perform. Capabilities are checked against it
@@ -26,21 +30,13 @@ pub(crate) enum CleanupIntent {
     Trash,
 }
 
-pub(crate) fn cleanup_capabilities() -> crate::contract::v1::CleanupCapabilities {
-    let capabilities = backend_capabilities();
-    crate::contract::v1::CleanupCapabilities {
-        permanent_cleanup: capabilities.permanent,
-        move_to_trash: capabilities.trash,
-        secure_identity: cfg!(any(windows, all(unix, not(target_os = "android")))),
-    }
-}
-
-fn backend_capabilities() -> CleanupCapabilities {
+pub(crate) fn backend_capabilities() -> CleanupCapabilities {
     #[cfg(windows)]
     {
         CleanupCapabilities {
             permanent: true,
             trash: windows::shell_backend_available(),
+            secure_identity: true,
         }
     }
 
@@ -49,6 +45,7 @@ fn backend_capabilities() -> CleanupCapabilities {
         CleanupCapabilities {
             permanent: true,
             trash: true,
+            secure_identity: true,
         }
     }
 
@@ -58,6 +55,7 @@ fn backend_capabilities() -> CleanupCapabilities {
         CleanupCapabilities {
             permanent: false,
             trash: false,
+            secure_identity: false,
         }
     }
 }
@@ -521,14 +519,12 @@ mod tests {
     #[test]
     fn capability_gate_matches_reported_capabilities() {
         let capabilities = super::backend_capabilities();
-        let public = super::cleanup_capabilities();
 
-        assert_eq!(public.permanent_cleanup, capabilities.permanent);
-        assert_eq!(public.move_to_trash, capabilities.trash);
         assert_eq!(
-            public.secure_identity,
+            capabilities.secure_identity,
             cfg!(any(windows, all(unix, not(target_os = "android"))))
         );
+        assert_eq!(capabilities.secure_identity, capabilities.permanent);
     }
 
     #[cfg(all(unix, not(target_os = "android")))]
