@@ -76,6 +76,7 @@ mod unix_deletion_gate {
     }
 }
 
+#[cfg(unix)]
 mod confidence_veto {
     use super::*;
 
@@ -180,6 +181,32 @@ mod unix_workspace_rule {
         std::fs::create_dir_all(&root).unwrap();
         assert!(filesystem::canonical_workspace(&root).is_ok());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// The same veto on Windows, from the environment's own roots: what is beneath
+/// them is demoted, the root itself is not, and a project elsewhere is not.
+#[cfg(windows)]
+mod windows_confidence_veto {
+    use super::*;
+
+    fn system_root() -> String {
+        std::env::var("SystemRoot")
+            .unwrap_or_else(|_| r"C:\Windows".to_string())
+            .trim_end_matches(['\\', '/'])
+            .to_string()
+    }
+
+    #[test]
+    fn a_path_under_the_windows_directory_is_marked_but_the_root_itself_is_not() {
+        let root = system_root();
+        assert!(marked_as_system(&format!(r"{root}\System32\node_modules")));
+        assert!(!marked_as_system(&root), "only what is under the root");
+    }
+
+    #[test]
+    fn an_ordinary_project_path_is_not_a_system_path() {
+        assert!(!marked_as_system(r"D:\work\project\node_modules"));
     }
 }
 
