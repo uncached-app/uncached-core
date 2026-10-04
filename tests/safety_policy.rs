@@ -149,10 +149,19 @@ mod unix_workspace_rule {
     use std::path::Path;
     use uncached_core::filesystem;
 
+    /// A directory that really is one. `Path::is_dir` follows symlinks, and
+    /// `canonical_workspace` refuses a symlink as a root on purpose, so a link
+    /// would be refused for that reason and say nothing about the table. On
+    /// macOS `/etc` and `/var` are such links into `/private`, and `/home` one
+    /// into `/System/Volumes/Data`.
+    fn real_dir(path: &str) -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+    }
+
     #[test]
     fn system_roots_are_not_accepted_as_a_workspace() {
         for path in ["/", "/usr", "/etc", "/var", "/bin", "/sbin"] {
-            if Path::new(path).is_dir() {
+            if real_dir(path) {
                 assert!(
                     filesystem::canonical_workspace(Path::new(path)).is_err(),
                     "{path}"
@@ -161,12 +170,31 @@ mod unix_workspace_rule {
         }
     }
 
+    /// On macOS a canonical path never says `/etc` or `/var`: it says
+    /// `/private/etc`. Those are the spellings the table has to refuse, and they
+    /// are real directories, so nothing but the table can be what refuses them.
+    /// The scratch space every process gets lives under `/private/var/folders`
+    /// and has to stay usable.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_private_spellings_of_etc_and_var_are_refused_and_scratch_space_is_not() {
+        for path in ["/private/etc", "/private/var"] {
+            assert!(real_dir(path), "{path} should be a directory on macOS");
+            assert!(
+                filesystem::canonical_workspace(Path::new(path)).is_err(),
+                "{path}"
+            );
+        }
+        assert!(filesystem::canonical_workspace(Path::new("/private/var/folders")).is_ok());
+    }
+
     /// Neither is a place the operating system owns the contents of; both are
-    /// ordinary places to keep a project.
+    /// ordinary places to keep a project. Only where they are real directories:
+    /// `/home` on macOS is a link, and a link is never a workspace.
     #[test]
     fn opt_and_home_are_accepted_as_a_workspace() {
         for path in ["/opt", "/home"] {
-            if Path::new(path).is_dir() {
+            if real_dir(path) {
                 assert!(
                     filesystem::canonical_workspace(Path::new(path)).is_ok(),
                     "{path} is accepted as a workspace today"
