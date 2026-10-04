@@ -85,8 +85,10 @@ pub(super) fn parse_directory_records(
 
         let file_id = read_unaligned_at::<[u8; 16]>(buffer, file_id_position);
         let name = buffer[name_start..name_end]
-            .chunks_exact(2)
-            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| u16::from_le_bytes(*bytes))
             .collect();
         records.push(ParsedDirectoryRecord { name, file_id });
 
