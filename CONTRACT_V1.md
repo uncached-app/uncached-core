@@ -43,7 +43,7 @@ All fields below are serialized with the shown camelCase names.
 
 `permanentCleanup` and `moveToTrash` report available cleanup backends. `secureIdentity` reports platform support for stable target identity checks. Values are capability facts, not authorization; callers must still handle backend rejection. Unix targets use the platform Trash integration supplied by the `trash` crate and revalidate the recorded filesystem identity immediately before cleanup.
 
-Permanent cleanup is identity-checked immediately before deletion. On Windows, Trash uses Shell `IFileOperation` with revalidation before and after releasing verification handles. Success additionally requires an `IFileOperationProgressSink::PostDeleteItem` callback for the expected target with a successful HRESULT, no operation abort, and passing postcondition checks. External deletion without that callback returns `secure_trash_postcondition_failed`, not success. Unix cleanup uses the same recorded-identity revalidation followed by the platform filesystem or Trash operation; it does not claim Windows handle-atomic guarantees. A cleanup capability of `true` means the backend is available, not that every target operation will succeed.
+Permanent cleanup is identity-checked immediately before deletion. On Windows, Trash uses Shell `IFileOperation` with revalidation before and after releasing verification handles. Success additionally requires an `IFileOperationProgressSink::PostDeleteItem` callback for the expected target with a successful HRESULT, no operation abort, and passing postcondition checks. External deletion without that callback returns `secure_trash_postcondition_failed`, not success. On Unix, permanent cleanup removes the tree through a pinned directory descriptor (`openat`/`unlinkat`) and re-checks the recorded identity before unlinking the target, so a replacement is rejected rather than removed. Unix Trash revalidates the recorded identity and then hands the path to the `trash` crate, which canonicalizes the parent directory, keeps the final name (a symlink swapped in for the target is moved as a link, never followed) and renames that name into the Trash. A directory swapped in for the target between the last identity check and that rename is not detected, and would be moved to the Trash instead; the result is recoverable. Only someone able to write to the target's parent directory can do this. Closing the window would mean reimplementing the freedesktop Trash specification on file descriptors, so it is documented rather than closed. Neither claims Windows handle-atomic guarantees. A cleanup capability of `true` means the backend is available, not that every target operation will succeed.
 
 The following capability example is Windows-only:
 
@@ -61,13 +61,16 @@ Linux and macOS report both cleanup capabilities as `true`. Android and unsuppor
 
 ### Measured platform verification
 
-The CI matrix is configured to run `cargo test --all-features`, Clippy,
-formatting, and benchmark compilation on Linux, Windows, and macOS. The Windows
+The CI workflow runs only when dispatched by hand (`workflow_dispatch`). Its
+matrix runs formatting, Clippy, `cargo test --all-features` and benchmark
+compilation on Linux and Windows; macOS is deliberately left out (see the
+comment in `.github/workflows/ci.yml`), so macOS behaviour is verified locally.
+The Windows
 backend includes tests for Recycle Bin success and abort handling, target
 identity and reparse-point rejection, callback and postcondition validation,
 concurrent final-release handling, replacement preservation, and permanent
 delete behavior. This document does not claim a local Windows execution; the
-platform-specific results are established by the corresponding CI job.
+Windows results are established by the corresponding CI job.
 
 ### Secure open scope and limits
 

@@ -43,6 +43,15 @@ pub struct TraversalEntry {
 /// if it was already found. Carrying them with the providers makes that
 /// structural — every function that can authorize a deletion already takes a
 /// `ProviderSet`, so none of them can be called without the rules in hand.
+/// Whether a provider needs a project beside a directory to classify it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Requires {
+    /// A marker file or directory confirms the project.
+    ProjectContext,
+    /// The directory name alone identifies it.
+    NameOnly,
+}
+
 pub struct ProviderSet {
     scanners: Vec<Box<dyn Scanner>>,
     ignore_rules: crate::ignore_rules::IgnoreRules,
@@ -101,52 +110,53 @@ impl ProviderSet {
         Self::with_scanner(NodeModulesScanner)
     }
 
+    /// Every built-in provider.
     pub fn all() -> Self {
-        let mut set = Self {
-            scanners: vec![
-                // React Native first: it claims paths inside `ios/` and
-                // `android/` that Gradle and CocoaPods would otherwise claim by
-                // their bare names, and the first provider to confirm wins.
-                Box::new(providers::ecosystems::react_native()),
-                Box::new(NodeModulesScanner),
-                Box::new(CargoTargetScanner),
-                Box::new(NextCacheScanner),
-                Box::new(TurboCacheScanner),
-                Box::new(PyCacheScanner),
-                Box::new(GradleScanner),
-                Box::new(XcodeDerivedDataScanner),
-                Box::new(SwiftBuildScanner),
-                Box::new(DotNetObjScanner),
-                Box::new(DartToolScanner),
-            ],
-            ignore_rules: crate::ignore_rules::IgnoreRules::default(),
-        };
-        for scanner in providers::ecosystems::all() {
-            set.add_scanner(scanner);
-        }
-        set
+        Self::builtin(|_| true)
     }
 
     /// Returns only providers that require project context before classifying a
     /// directory. This is the conservative policy for callers where deleting a
     /// same-named directory is more dangerous than missing a cache.
     pub fn all_contextual() -> Self {
-        let mut set = Self {
-            scanners: vec![
+        Self::builtin(|requires| requires == Requires::ProjectContext)
+    }
+
+    /// The built-in providers in registration order, keeping those `keep`
+    /// accepts. One list serves both sets above, so they cannot drift apart:
+    /// the contextual set is this one minus the providers that classify by
+    /// name alone.
+    fn builtin(keep: impl Fn(Requires) -> bool) -> Self {
+        use Requires::{NameOnly, ProjectContext};
+        let fixed: [(Box<dyn Scanner>, Requires); 11] = [
+            // React Native first: it claims paths inside `ios/` and
+            // `android/` that Gradle and CocoaPods would otherwise claim by
+            // their bare names, and the first provider to confirm wins.
+            (
                 Box::new(providers::ecosystems::react_native()),
-                Box::new(NodeModulesScanner),
-                Box::new(CargoTargetScanner),
-                Box::new(NextCacheScanner),
-                Box::new(TurboCacheScanner),
-                Box::new(XcodeDerivedDataScanner),
-                Box::new(SwiftBuildScanner),
-                Box::new(DotNetObjScanner),
-                Box::new(DartToolScanner),
-            ],
-            ignore_rules: crate::ignore_rules::IgnoreRules::default(),
-        };
+                ProjectContext,
+            ),
+            (Box::new(NodeModulesScanner), ProjectContext),
+            (Box::new(CargoTargetScanner), ProjectContext),
+            (Box::new(NextCacheScanner), ProjectContext),
+            (Box::new(TurboCacheScanner), ProjectContext),
+            // Tool-generated caches whose name alone identifies them.
+            (Box::new(PyCacheScanner), NameOnly),
+            (Box::new(GradleScanner), NameOnly),
+            (Box::new(XcodeDerivedDataScanner), ProjectContext),
+            (Box::new(SwiftBuildScanner), ProjectContext),
+            (Box::new(DotNetObjScanner), ProjectContext),
+            (Box::new(DartToolScanner), ProjectContext),
+        ];
+        let mut set = Self::new();
+        for (scanner, requires) in fixed {
+            if keep(requires) {
+                set.scanners.push(scanner);
+            }
+        }
         // Every project-type provider requires its ecosystem's marker beside
-        // the directory, which is exactly the property this set selects for.
+        // the directory, so these belong to both sets. `react_native` is listed
+        // here as well, and `add_scanner` keeps the one registered first.
         for scanner in providers::ecosystems::all() {
             set.add_scanner(scanner);
         }
@@ -186,5 +196,53 @@ impl ProviderSet {
 impl Default for ProviderSet {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderSet;
+    use crate::model::Category;
+
+    fn categories(set: &ProviderSet) -> Vec<Category> {
+        set.categories().collect()
+    }
+
+    /// React Native claims paths inside `ios/` and `android/` that Gradle and
+    /// CocoaPods would claim by bare name, and the first provider to confirm
+    /// wins, so it has to be first in every set that has it.
+    #[test]
+    fn react_native_is_registered_before_the_providers_it_overlaps() {
+        for set in [ProviderSet::all(), ProviderSet::all_contextual()] {
+            assert_eq!(categories(&set).first(), Some(&Category::ReactNative));
+        }
+    }
+
+    #[test]
+    fn every_category_is_registered_once() {
+        for set in [ProviderSet::all(), ProviderSet::all_contextual()] {
+            let found = categories(&set);
+            for (index, category) in found.iter().enumerate() {
+                assert!(!found[..index].contains(category), "{category:?} twice");
+            }
+        }
+    }
+
+    /// The contextual set is the full set minus the providers that classify by
+    /// name alone, in the same order — the property that keeping one list is
+    /// meant to guarantee.
+    #[test]
+    fn the_contextual_set_is_the_full_set_without_the_name_only_providers() {
+        let by_name_alone = [Category::PyCache, Category::Gradle];
+        let expected: Vec<_> = categories(&ProviderSet::all())
+            .into_iter()
+            .filter(|category| !by_name_alone.contains(category))
+            .collect();
+
+        assert_eq!(categories(&ProviderSet::all_contextual()), expected);
+        assert_eq!(
+            ProviderSet::all().len(),
+            expected.len() + by_name_alone.len()
+        );
     }
 }

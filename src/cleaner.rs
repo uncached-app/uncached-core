@@ -194,6 +194,8 @@ mod tests {
         fs::write(project.join("package.json"), b"{}").unwrap();
         let target = ScanTarget::new(target_path.clone(), Category::NodeModules, 7)
             .with_identity(file_identity(&target_path));
+        #[cfg(all(unix, not(target_os = "android")))]
+        let original = crate::filesystem::canonical(&target_path).unwrap();
 
         let result = clean_to_trash(&root, &ProviderSet::free(), &target);
 
@@ -218,6 +220,7 @@ mod tests {
             assert_eq!(report.freed_bytes, 7);
             assert!(!report.size_pending);
             assert!(!target_path.exists());
+            purge_from_trash(&original);
         }
         #[cfg(not(any(windows, all(unix, not(target_os = "android")))))]
         {
@@ -381,6 +384,31 @@ mod tests {
         ));
         assert!(target_path.is_dir());
     }
+
+    /// This test moves a real directory into the user's real Trash, so it takes
+    /// it back out: every `cargo test` would otherwise leave a `node_modules`
+    /// there. Only what this test put there is purged, found by the path it
+    /// came from. The crate offers no way to list the Trash on macOS, where the
+    /// item stays.
+    #[cfg(all(
+        unix,
+        not(target_os = "android"),
+        not(target_os = "macos"),
+        not(target_os = "ios")
+    ))]
+    fn purge_from_trash(original: &std::path::Path) {
+        let Ok(items) = trash::os_limited::list() else {
+            return;
+        };
+        let mine: Vec<_> = items
+            .into_iter()
+            .filter(|item| item.original_path() == original)
+            .collect();
+        let _ = trash::os_limited::purge_all(mine);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn purge_from_trash(_original: &std::path::Path) {}
 
     struct CleanupGuard(PathBuf);
 

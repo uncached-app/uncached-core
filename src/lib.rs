@@ -23,12 +23,12 @@ pub use dependencies::{
 };
 pub use discovery::{
     home_directory, known_locations, probe_home, probe_system, probe_temp, Discovery,
-    KnownLocation, KnownLocationScanner, LocationKind,
+    KnownLocation, KnownLocationScanner,
 };
 pub use error::{CoreError, CoreErrorCode, CoreErrorInfo, CoreResult};
 pub use filesystem::canonical;
 pub use ignore_rules::{IgnoreRuleError, IgnoreRules};
-pub use model::{Category, CleanReport, FileIdentity, ScanTarget, TraversalOutcome};
+pub use model::{Category, CleanReport, FileIdentity, LocationKind, ScanTarget, TraversalOutcome};
 pub use scanner::{
     ecosystems, traverse_workspace, CargoTargetScanner, DartToolScanner, DotNetObjScanner,
     GradleScanner, NextCacheScanner, NodeModulesScanner, ProjectMarker, ProjectScanner,
@@ -36,6 +36,15 @@ pub use scanner::{
     TurboCacheScanner, XcodeDerivedDataScanner,
 };
 
+/// The cleanup backends this platform offers, in the shape the app receives.
+///
+/// The mapping lives here, at the edge, so the cleanup layer reports facts in
+/// its own terms and never depends on the wire contract.
 pub fn cleanup_capabilities() -> contract::v1::CleanupCapabilities {
-    secure_cleanup::cleanup_capabilities()
+    let backend = secure_cleanup::backend_capabilities();
+    contract::v1::CleanupCapabilities {
+        permanent_cleanup: backend.permanent,
+        move_to_trash: backend.trash,
+        secure_identity: backend.secure_identity,
+    }
 }

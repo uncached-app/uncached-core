@@ -39,6 +39,11 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
 
+# Same crate and version as above, so the integration tests can take back out of
+# the user's Trash what they put there.
+[target.'cfg(all(unix, not(target_os = "android")))'.dev-dependencies]
+trash = "5.2"
+
 [[bench]]
 name = "pruning"
 harness = false
