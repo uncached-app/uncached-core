@@ -1,0 +1,24 @@
+name: New cleanup target
+description: Propose a cache or build artifact to detect
+labels: [cleanup-target]
+body:
+  - type: input
+    id: tool
+    attributes:
+      label: Tool or ecosystem
+    validations:
+      required: true
+  - type: textarea
+    id: paths
+    attributes:
+      label: Paths per platform
+      description: Exact locations on macOS, Linux, and Windows.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Is it safe to delete?
+      description: What regenerates it, and which running processes must be closed first.
+    validations:
+      required: true

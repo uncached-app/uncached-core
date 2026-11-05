@@ -2,6 +2,9 @@
 name = "uncached-core"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+description = "Scanner and safe cleanup engine for build artifacts and developer caches."
+repository = "https://github.com/uncached-app/uncached-core"
 
 [features]
 bench = []
