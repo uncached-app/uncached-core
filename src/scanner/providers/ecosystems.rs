@@ -35,7 +35,7 @@ pub fn sbt() -> ProjectScanner {
 pub fn gradle_build() -> ProjectScanner {
     ProjectScanner::new(
         Category::GradleBuild,
-        &["build"],
+        &["build", ".cxx", ".externalNativeBuild"],
         ProjectMarker::AnyFile(&[
             "build.gradle",
             "build.gradle.kts",
@@ -210,6 +210,38 @@ pub fn sveltekit() -> ProjectScanner {
     )
 }
 
+/// `.vercel` itself is never claimed: its `project.json` links the directory
+/// to a deployed project, and only `output` beneath it is build output.
+pub fn js_build_cache() -> ProjectScanner {
+    ProjectScanner::new(
+        Category::JsBuildCache,
+        &[
+            ".parcel-cache",
+            ".astro",
+            ".docusaurus",
+            ".output",
+            ".vercel/output",
+        ],
+        ProjectMarker::AnyFile(&["package.json"]),
+    )
+}
+
+pub fn serverless_build() -> ProjectScanner {
+    ProjectScanner::new(
+        Category::ServerlessBuild,
+        &[".serverless", ".aws-sam"],
+        ProjectMarker::AnyFile(&[
+            "serverless.yml",
+            "serverless.yaml",
+            "serverless.ts",
+            "serverless.js",
+            "template.yaml",
+            "template.yml",
+            "samconfig.toml",
+        ]),
+    )
+}
+
 /// Every project-type provider defined here, in the order a set should register
 /// them: the ones that claim a nested path come before the ones that would
 /// claim the same directory by its bare name.
@@ -234,5 +266,7 @@ pub fn all() -> Vec<ProjectScanner> {
         cocoapods(),
         nuxt(),
         sveltekit(),
+        js_build_cache(),
+        serverless_build(),
     ]
 }

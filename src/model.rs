@@ -90,6 +90,11 @@ pub enum Category {
     NuxtCache,
     /// SvelteKit's generated app.
     SvelteKitCache,
+    /// Bundler, framework and deploy-tool output in a JavaScript project:
+    /// Parcel, Astro, Docusaurus, Nitro and Vercel's build output.
+    JsBuildCache,
+    /// Packages built by the Serverless Framework and AWS SAM.
+    ServerlessBuild,
     /// Flutter's `build` and the per-platform ephemeral directories.
     FlutterBuild,
     /// Mix's compiled output and the language servers' state beside it.
@@ -133,6 +138,8 @@ pub enum Category {
     /// The Android SDK's machine-wide downloads and the emulators built from
     /// them. Nowhere near a project: one copy serves every app on the machine.
     AndroidSdk,
+    /// HTTP and code caches a web browser keeps outside its profile.
+    BrowserCache,
     Custom(String),
 }
 
@@ -158,6 +165,8 @@ impl Category {
             Self::CMakeBuild => "CMakeBuild".to_owned(),
             Self::NuxtCache => "NuxtCache".to_owned(),
             Self::SvelteKitCache => "SvelteKitCache".to_owned(),
+            Self::JsBuildCache => "JsBuildCache".to_owned(),
+            Self::ServerlessBuild => "ServerlessBuild".to_owned(),
             Self::FlutterBuild => "FlutterBuild".to_owned(),
             Self::ElixirBuild => "ElixirBuild".to_owned(),
             Self::HaskellBuild => "HaskellBuild".to_owned(),
@@ -175,6 +184,7 @@ impl Category {
             Self::AiToolCache => "AiToolCache".to_owned(),
             Self::EditorCache => "EditorCache".to_owned(),
             Self::AndroidSdk => "AndroidSdk".to_owned(),
+            Self::BrowserCache => "BrowserCache".to_owned(),
             Self::Custom(name) => format!("{CUSTOM_CATEGORY_PREFIX}{name}"),
         }
     }
@@ -205,6 +215,8 @@ impl Category {
             "CMakeBuild" => Self::CMakeBuild,
             "NuxtCache" => Self::NuxtCache,
             "SvelteKitCache" => Self::SvelteKitCache,
+            "JsBuildCache" => Self::JsBuildCache,
+            "ServerlessBuild" => Self::ServerlessBuild,
             "FlutterBuild" => Self::FlutterBuild,
             "ElixirBuild" => Self::ElixirBuild,
             "HaskellBuild" => Self::HaskellBuild,
@@ -222,6 +234,7 @@ impl Category {
             "AiToolCache" => Self::AiToolCache,
             "EditorCache" => Self::EditorCache,
             "AndroidSdk" => Self::AndroidSdk,
+            "BrowserCache" => Self::BrowserCache,
             _ => {
                 let name = value.strip_prefix(CUSTOM_CATEGORY_PREFIX)?;
                 if !valid_custom_category_name(name) {
@@ -379,6 +392,9 @@ mod tests {
             (Category::AiToolCache, "AiToolCache"),
             (Category::EditorCache, "EditorCache"),
             (Category::AndroidSdk, "AndroidSdk"),
+            (Category::BrowserCache, "BrowserCache"),
+            (Category::JsBuildCache, "JsBuildCache"),
+            (Category::ServerlessBuild, "ServerlessBuild"),
         ] {
             assert_eq!(serde_json::to_value(&category).unwrap(), json!(expected));
             assert_eq!(Category::from_wire(expected), Some(category));

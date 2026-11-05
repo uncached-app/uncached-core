@@ -700,6 +700,11 @@ fn the_locations_that_can_hold_originals_stay_at_review() {
         ".pyenv/versions",
         // Re-pullable, but tens of gigabytes over a network.
         ".ollama/models",
+        // Model weights, often gated or tens of gigabytes to fetch again.
+        ".cache/huggingface/hub",
+        // `softlink` installs point environments into the package cache.
+        ".conda/pkgs",
+        "miniconda3/pkgs",
         // A package delisted from the Asset Store cannot be downloaded
         // again, and this cache holds the last copy of it.
         "Library/Unity/Asset Store-5.x",
@@ -732,5 +737,20 @@ fn ai_tool_entries_are_never_offered_as_disposable() {
                 location.label
             );
         }
+    }
+}
+
+#[test]
+fn browser_entries_stay_out_of_the_profile() {
+    for location in known_locations() {
+        if location.category != Category::BrowserCache {
+            continue;
+        }
+        assert!(
+            location.relative.starts_with("Library/Caches/")
+                || location.relative.starts_with(".cache/"),
+            "{} reaches into a browser profile",
+            location.label
+        );
     }
 }

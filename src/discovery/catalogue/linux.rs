@@ -1,6 +1,7 @@
 use super::KnownLocation;
 use crate::model::Category::{
-    AiToolCache, AndroidSdk, Docker, EditorCache, GodotCache, PackageManagerCache, UnityLibrary,
+    AiToolCache, AndroidSdk, BrowserCache, Docker, EditorCache, GodotCache, PackageManagerCache,
+    UnityLibrary,
 };
 use crate::model::LocationKind::{Artifact, ReportOnly, SharedCache, ToolState};
 
@@ -23,6 +24,20 @@ pub(super) static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Puppeteer browsers" => ".cache/puppeteer", PackageManagerCache, SharedCache, &[];
     "Playwright browsers" => ".cache/ms-playwright", PackageManagerCache, SharedCache, &[];
     "uv cache" => ".cache/uv", PackageManagerCache, SharedCache, &["uv", "uvx"];
+    "Cargo git checkouts" => ".cargo/git", PackageManagerCache, SharedCache, &["cargo"];
+    "Bundler cache" => ".bundle/cache", PackageManagerCache, SharedCache, &["bundle"];
+    "Composer cache" => ".cache/composer", PackageManagerCache, SharedCache, &["composer"];
+    "Poetry cache" => ".cache/pypoetry/cache", PackageManagerCache, SharedCache, &["poetry"];
+    "Conda packages" => ".conda/pkgs", PackageManagerCache, ToolState, &["conda", "mamba"];
+    "Miniconda packages" => "miniconda3/pkgs", PackageManagerCache, ToolState, &["conda", "mamba"];
+    "Dart pub cache" => ".pub-cache/hosted", PackageManagerCache, SharedCache, &["dart", "flutter"];
+    "Cabal packages" => ".cabal/packages", PackageManagerCache, SharedCache, &["cabal"];
+    "pre-commit environments" => ".cache/pre-commit", PackageManagerCache, SharedCache, &["pre-commit"];
+    "Homebrew downloads" => ".cache/Homebrew", PackageManagerCache, SharedCache, &[];
+    "Electron downloads" => ".cache/electron", PackageManagerCache, SharedCache, &[];
+    "electron-builder cache" => ".cache/electron-builder", PackageManagerCache, SharedCache, &[];
+    "ccache" => ".cache/ccache", PackageManagerCache, SharedCache, &["ccache"];
+    "sccache" => ".cache/sccache", PackageManagerCache, SharedCache, &["sccache"];
 
     "Unity package cache" => ".cache/Unity/upm", UnityLibrary, SharedCache, &["Unity"];
     "Unity Asset Store packages" => ".local/share/unity3d/Asset Store-5.x", UnityLibrary, ToolState, &["Unity"];
@@ -34,6 +49,10 @@ pub(super) static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "Android emulators" => ".android/avd", AndroidSdk, ReportOnly, &["emulator", "qemu-system-x86_64"];
 
     "Docker disk image" => ".docker/desktop/vms/0/data", Docker, ReportOnly, &["com.docker.backend", "docker"];
+    "Colima virtual machines" => ".colima/_lima", Docker, ReportOnly, &["colima", "limactl"];
+
+    "Hugging Face hub" => ".cache/huggingface/hub", AiToolCache, ToolState, &[];
+    "PyTorch hub" => ".cache/torch/hub", AiToolCache, ToolState, &[];
 
     "nvm download cache" => ".nvm/.cache", PackageManagerCache, SharedCache, &[];
     "Node versions (nvm)" => ".nvm/versions/node", PackageManagerCache, ToolState, &["node"];
@@ -47,9 +66,24 @@ pub(super) static PLATFORM_LOCATIONS: &[KnownLocation] = locations! {
     "opencode cache" => ".cache/opencode", AiToolCache, ToolState, &["opencode"];
     "opencode logs" => ".local/share/opencode/log", AiToolCache, ToolState, &["opencode"];
     "opencode tool output" => ".local/share/opencode/tool-output", AiToolCache, ToolState, &["opencode"];
+    "opencode snapshots" => ".local/share/opencode/snapshot", AiToolCache, ToolState, &["opencode"];
+    "Codex cache" => ".codex/cache", AiToolCache, ToolState, &["codex"];
+    "Gemini CLI scratch" => ".gemini/tmp", AiToolCache, ToolState, &["gemini"];
 
     "JetBrains caches" => ".cache/JetBrains", EditorCache, ToolState, &["idea", "pycharm", "webstorm", "goland", "clion", "phpstorm", "rubymine", "rustrover", "datagrip"];
     "VS Code cache" => ".config/Code/Cache", EditorCache, Artifact, &["Code"];
     "VS Code cached data" => ".config/Code/CachedData", EditorCache, Artifact, &["Code"];
     "VS Code GPU cache" => ".config/Code/GPUCache", EditorCache, Artifact, &["Code"];
+    "Cursor cache" => ".config/Cursor/Cache", EditorCache, Artifact, &["Cursor"];
+    "Cursor cached data" => ".config/Cursor/CachedData", EditorCache, Artifact, &["Cursor"];
+    "Cursor GPU cache" => ".config/Cursor/GPUCache", EditorCache, Artifact, &["Cursor"];
+    "Windsurf cache" => ".config/Windsurf/Cache", EditorCache, Artifact, &["Windsurf"];
+    "Windsurf cached data" => ".config/Windsurf/CachedData", EditorCache, Artifact, &["Windsurf"];
+    "Windsurf GPU cache" => ".config/Windsurf/GPUCache", EditorCache, Artifact, &["Windsurf"];
+
+    "Chrome cache" => ".cache/google-chrome", BrowserCache, Artifact, &["chrome"];
+    "Chromium cache" => ".cache/chromium", BrowserCache, Artifact, &["chromium"];
+    "Brave cache" => ".cache/BraveSoftware/Brave-Browser", BrowserCache, Artifact, &["brave"];
+    "Edge cache" => ".cache/microsoft-edge", BrowserCache, Artifact, &["msedge"];
+    "Firefox cache" => ".cache/mozilla/firefox", BrowserCache, Artifact, &["firefox"];
 };
