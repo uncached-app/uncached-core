@@ -429,10 +429,13 @@ fn a_dangerous_name_is_refused_without_its_project_marker() {
     fs::create_dir_all(root.join("game/Library")).unwrap();
     fs::write(root.join("game/Assembly-CSharp.csproj"), b"<Project/>").unwrap();
 
-    // `vendor` is Composer's only with a composer.json beside it.
+    // `vendor` is Composer's only beside a manifest it can be restored from.
     fs::create_dir_all(root.join("notes/vendor")).unwrap();
+    fs::create_dir_all(root.join("library/vendor")).unwrap();
+    fs::write(root.join("library/composer.json"), b"{}").unwrap();
     fs::create_dir_all(root.join("php/vendor")).unwrap();
     fs::write(root.join("php/composer.json"), b"{}").unwrap();
+    fs::write(root.join("php/composer.lock"), b"{}").unwrap();
 
     // `build` belongs to whichever ecosystem's marker is present.
     fs::create_dir_all(root.join("plain/build")).unwrap();
