@@ -52,6 +52,7 @@ impl KnownLocationScanner {
             Category::UnityLibrary,
             Category::GodotCache,
             Category::AndroidSdk,
+            Category::BrowserCache,
         ] {
             let temp = scratch
                 .iter()

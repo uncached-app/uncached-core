@@ -42,7 +42,8 @@ impl KnownLocation {
             ".android/avd" => Some("avdmanager delete avd -n <name>"),
             "Library/Containers/com.docker.docker/Data/vms/0/data"
             | ".docker/desktop/vms/0/data"
-            | "AppData/Local/Docker/wsl/data" => Some("docker system prune"),
+            | "AppData/Local/Docker/wsl/data"
+            | ".colima/_lima" => Some("docker system prune"),
             _ => None,
         }
     }

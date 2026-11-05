@@ -38,4 +38,4 @@ built with.
 
 ## License
 
-Proprietary.
+[Apache-2.0](LICENSE).

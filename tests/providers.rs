@@ -67,6 +67,8 @@ fn all_registers_every_scanner_in_deterministic_order() {
         Category::CocoapodsPods,
         Category::NuxtCache,
         Category::SvelteKitCache,
+        Category::JsBuildCache,
+        Category::ServerlessBuild,
     ];
     assert_eq!(providers.len(), expected.len());
     assert_eq!(providers.categories().collect::<Vec<_>>(), expected);
@@ -427,10 +429,13 @@ fn a_dangerous_name_is_refused_without_its_project_marker() {
     fs::create_dir_all(root.join("game/Library")).unwrap();
     fs::write(root.join("game/Assembly-CSharp.csproj"), b"<Project/>").unwrap();
 
-    // `vendor` is Composer's only with a composer.json beside it.
+    // `vendor` is Composer's only beside a manifest it can be restored from.
     fs::create_dir_all(root.join("notes/vendor")).unwrap();
+    fs::create_dir_all(root.join("library/vendor")).unwrap();
+    fs::write(root.join("library/composer.json"), b"{}").unwrap();
     fs::create_dir_all(root.join("php/vendor")).unwrap();
     fs::write(root.join("php/composer.json"), b"{}").unwrap();
+    fs::write(root.join("php/composer.lock"), b"{}").unwrap();
 
     // `build` belongs to whichever ecosystem's marker is present.
     fs::create_dir_all(root.join("plain/build")).unwrap();
@@ -515,4 +520,106 @@ fn a_nested_artifact_is_claimed_only_at_its_own_path() {
         !found.contains(&Category::CocoapodsPods),
         "no Podfile, so CocoaPods claims nothing either"
     );
+}
+
+fn found_paths(root: &Path) -> Vec<(PathBuf, Category)> {
+    let mut found = Vec::new();
+    let cancelled = AtomicBool::new(false);
+    traverse_workspace(root, &ProviderSet::all(), &cancelled, |entry| {
+        match entry.category.clone() {
+            Some(category) => {
+                found.push((entry.path.clone(), category));
+                TraversalControl::Prune
+            }
+            None => TraversalControl::Continue,
+        }
+    })
+    .unwrap();
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
+}
+
+fn expected_paths(root: &Path, entries: &[(&str, Category)]) -> Vec<(PathBuf, Category)> {
+    entries
+        .iter()
+        .map(|(path, category)| {
+            (
+                uncached_core::canonical(root.join(path)).unwrap(),
+                category.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn js_build_caches_are_claimed_only_inside_a_package() {
+    let root = fixture();
+    for artifact in [
+        ".parcel-cache",
+        ".astro",
+        ".docusaurus",
+        ".output",
+        ".vercel/output",
+    ] {
+        fs::create_dir_all(root.join("web").join(artifact)).unwrap();
+        fs::create_dir_all(root.join("loose").join(artifact)).unwrap();
+    }
+    fs::write(root.join("web/package.json"), b"{}").unwrap();
+    fs::write(root.join("web/.vercel/project.json"), b"{}").unwrap();
+
+    let expected = expected_paths(
+        &root,
+        &[
+            ("web/.astro", Category::JsBuildCache),
+            ("web/.docusaurus", Category::JsBuildCache),
+            ("web/.output", Category::JsBuildCache),
+            ("web/.parcel-cache", Category::JsBuildCache),
+            ("web/.vercel/output", Category::JsBuildCache),
+        ],
+    );
+
+    assert_eq!(found_paths(&root), expected);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn serverless_packages_need_their_framework_config() {
+    let root = fixture();
+    fs::create_dir_all(root.join("sls/.serverless")).unwrap();
+    fs::write(root.join("sls/serverless.yml"), b"service: api").unwrap();
+    fs::create_dir_all(root.join("sam/.aws-sam")).unwrap();
+    fs::write(root.join("sam/template.yaml"), b"Resources: {}").unwrap();
+    fs::create_dir_all(root.join("bare/.serverless")).unwrap();
+    fs::create_dir_all(root.join("bare/.aws-sam")).unwrap();
+
+    let expected = expected_paths(
+        &root,
+        &[
+            ("sam/.aws-sam", Category::ServerlessBuild),
+            ("sls/.serverless", Category::ServerlessBuild),
+        ],
+    );
+
+    assert_eq!(found_paths(&root), expected);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn android_native_build_output_belongs_to_its_gradle_module() {
+    let root = fixture();
+    fs::create_dir_all(root.join("app/.cxx")).unwrap();
+    fs::create_dir_all(root.join("app/.externalNativeBuild")).unwrap();
+    fs::write(root.join("app/build.gradle.kts"), b"plugins {}").unwrap();
+    fs::create_dir_all(root.join("loose/.cxx")).unwrap();
+
+    let expected = expected_paths(
+        &root,
+        &[
+            ("app/.cxx", Category::GradleBuild),
+            ("app/.externalNativeBuild", Category::GradleBuild),
+        ],
+    );
+
+    assert_eq!(found_paths(&root), expected);
+    let _ = fs::remove_dir_all(root);
 }
